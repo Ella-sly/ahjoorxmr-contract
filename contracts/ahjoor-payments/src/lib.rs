@@ -10590,6 +10590,13 @@ impl AhjoorPaymentsContract {
             .expect("Mediation case not found")
     }
 
+    /// Return how (or whether) a specific DAO member voted on a mediation case.
+    pub fn get_dao_vote(env: Env, case_id: u32, voter: Address) -> Option<bool> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::DaoMediationVote(case_id, voter))
+    }
+
     /// Return the DAO mediation case for `payment_id`, if one exists.
     pub fn get_dao_case_by_payment(env: Env, payment_id: u32) -> Option<DaoMediationCase> {
         let case_id: u32 = env.storage().persistent().get(&DataKey3::DaoCaseByPayment(payment_id))?;
