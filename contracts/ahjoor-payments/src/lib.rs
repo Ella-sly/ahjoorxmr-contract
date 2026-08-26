@@ -4933,6 +4933,17 @@ impl AhjoorPaymentsContract {
         None
     }
 
+    /// Return the full notification key rotation history for a merchant.
+    pub fn get_notification_key_history(
+        env: Env,
+        merchant: Address,
+    ) -> soroban_sdk::Vec<NotificationKeyEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::NotificationKeyHistory(merchant))
+            .unwrap_or(soroban_sdk::Vec::new(&env))
+    }
+
     /// Set the notification key rotation overlap window (admin only).
     pub fn set_notification_overlap_window(
         env: Env,
