@@ -2859,12 +2859,26 @@ impl AhjoorPaymentsContract {
             .expect("Oracle not configured")
     }
 
+    /// Return the oracle-locked pricing snapshot for a dynamic payment, if one exists.
+    pub fn get_dynamic_payment(env: Env, payment_id: u32) -> Option<DynamicPayment> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::DynamicPayment(payment_id))
+    }
+
     // --- Admin ---
 
     pub fn set_merchant_slippage_tolerance(env: Env, merchant: Address, bps: u32) {
         Self::require_not_paused(&env);
         merchant.require_auth();
         env.storage().persistent().set(&DataKey3::SlippageToleranceBps(merchant), &bps);
+    }
+
+    /// Return a merchant's configured slippage tolerance in basis points, if set.
+    pub fn get_merchant_slippage_tolerance(env: Env, merchant: Address) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::SlippageToleranceBps(merchant))
     }
 
     pub fn set_max_batch_size(env: Env, new_size: u32) {
