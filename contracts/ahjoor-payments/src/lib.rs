@@ -4199,6 +4199,17 @@ impl AhjoorPaymentsContract {
             .unwrap_or(DEFAULT_MAX_BATCH_SIZE)
     }
 
+    /// Get the cumulative refunded amount for a payment.
+    /// Returns the total amount that has been refunded for the given payment ID.
+    pub fn get_payment_refunded_amount(env: Env, payment_id: u32) -> i128 {
+        let payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+        payment.refunded_amount
+    }
+
     pub fn is_disputed(env: Env, payment_id: u32) -> bool {
         let payment: Payment = env
             .storage()
