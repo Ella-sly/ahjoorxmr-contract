@@ -3531,6 +3531,31 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Returns the configured (min_seconds, max_seconds) bounds for round
+    /// duration updates (#752). Falls back to the same defaults enforced
+    /// internally by `update_round_duration` when unset.
+    pub fn get_round_duration_bounds(env: Env) -> (u64, u64) {
+        let min_dur: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey4::MinRoundDuration)
+            .unwrap_or(60);
+        let max_dur: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey4::MaxRoundDuration)
+            .unwrap_or(u64::MAX);
+        (min_dur, max_dur)
+    }
+
+    /// Returns the pending round duration change scheduled by
+    /// `update_round_duration`, if any (#752).
+    pub fn get_pending_round_duration(env: Env) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey4::PendingRoundDuration)
+    }
+
     /// Admin manually penalises a specific defaulter from the current round's
     /// defaulters list. Transfers the penalty amount from the member to the
     /// contract and updates their default count and suspension status.
@@ -3614,6 +3639,15 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the currently configured co-signer grace window, in ledgers
+    /// (#747). Falls back to the same default used internally when unset.
+    pub fn get_co_signer_window(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey4::CoSignerWindowLedgers)
+            .unwrap_or(0)
     }
 
     /// Member requests a grace-period deferral of their pending penalty.
@@ -10012,6 +10046,12 @@ impl AhjoorContract {
             .unwrap_or(0)
     }
 
+    /// Get treasury configuration (admin and enabled flag), if the group
+    /// treasury has been enabled (#753).
+    pub fn get_treasury_config(env: Env) -> Option<TreasuryConfig> {
+        env.storage().instance().get(&DataKey3::TreasuryConfig)
+    }
+
     /// Internal: update a member's credit score after a relevant event.
     fn update_credit_score_internal(env: &Env, member: &Address, reason: Symbol) {
         let mut scores: Map<Address, MemberScore> = env
@@ -10770,6 +10810,15 @@ impl AhjoorContract {
         repayment_window_ledgers: u32,
     ) -> u32 {
         member.require_auth();
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&member) {
+            panic_with_error!(&env, Error::NotAMember);
+        }
 
         if amount <= 0 {
             panic!("Loan amount must be positive");
@@ -11739,6 +11788,7 @@ mod test;
 mod test_audit_trail;
 mod test_contrib_delegation;
 mod test_cosigner_guarantee;
+mod test_emergency_loan;
 mod test_emergency_reserve;
 mod test_group_freeze;
 mod test_group_split;
