@@ -116,14 +116,20 @@ If you need this doc expanded with code snippets from the contract (field names,
 After an arbiter resolves a dispute via `resolve_dispute`, the escrow may enter a **Cooling-Off Period** rather than immediately releasing funds. This gives the losing party a window to flag potential resolution errors.
 
 ### Configuration
-- **Default Duration**: The default cooling-off period is `0` seconds (immediate execution/release).
+- **Default Duration**: The default cooling-off period is `0` seconds (immediate execution/release). This zero-second configuration preserves the immediate-resolution/legacy behavior.
 - **Custom Duration**: An admin can configure the cooling-off duration globally for the contract by calling `set_resolution_cooloff_secs(admin, cooling_off_secs)`.
 
 ### Behavior & Restrictions
 - **Entering Cooling-Off**: When `resolve_dispute` is called and a cooling-off period > 0 is set, the escrow status changes to `CoolingOff`. Funds are **not** moved yet.
-- **Flagging Errors**: During the cooling-off window, the losing party can call `flag_resolution_error(party, escrow_id, reason_hash)`. Attempting to flag after the window expires is rejected.
-- **Blocked Actions**: Calling `finalize_resolution` is blocked if the cooling-off window has not elapsed, or if a flag has been raised and not yet cleared by an admin.
+- **Flagging Errors**: During the cooling-off window, the losing party can call `flag_resolution_error(party, escrow_id, reason_hash)`.
+  - **Winning Party Restriction**: A winning party cannot flag the resolution (reverts with `OnlyLosingPartyCanFlagResolutionError`).
+  - **Split Verdicts**: In the case of a split verdict where both parties receive a share (neither is an outright winner), both the buyer and the seller are permitted to flag the resolution.
+  - **Time Restriction**: Attempting to flag after the window expires is rejected (reverts with `CoolingOffWindowHasExpired`).
+- **Blocked Actions**: Calling `finalize_resolution` is blocked if the cooling-off window has not elapsed (reverts with `CoolingOffWindowHasNotElapsed`), or if a flag has been raised and not yet cleared by an admin (reverts with `ResolutionIsFlaggedAdminMustReviewBeforeFinalization`).
 - **Admin Review**: If a resolution is flagged, an admin must review and clear the flag using `clear_resolution_flag(admin, escrow_id)` before the resolution can be finalized.
 
 ### Finalization
-Once the cooling-off window has expired (and assuming no pending flags remain), anyone can call `finalize_resolution(escrow_id)`. This action executes the actual fund transfer according to the arbiter's decision and updates the escrow status to a terminal state (e.g., `Refunded` or `Released`).
+Once the cooling-off window has expired (and assuming no pending flags remain), anyone can call `finalize_resolution(escrow_id)`. This action executes the actual fund transfer according to the arbiter's decision and updates the escrow status to a terminal state:
+- **Buyer Win (100%)**: Funds returned to buyer, status becomes `Refunded`.
+- **Seller Win (0% for buyer)**: Funds sent to seller, status becomes `Released`.
+- **Split Verdict**: Funds distributed proportionally, status transitions to `Refunded` (or the appropriate terminal state for partial distribution).

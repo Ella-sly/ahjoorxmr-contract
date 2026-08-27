@@ -39,6 +39,7 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 - [**Merchant Referral Program**](payments-referral.md) — Referral registration, commission calculation on platform fees, accrual windows, and claiming.
 - [**DAO Mediation for Disputed Payments**](dao-mediation.md) — On-chain DAO voting and resolution process for disputed merchant payments.
 - [**Multi-Token Invoice**](multi-token-invoice.md) — Guide to multi-token invoicing, oracle-based price feeds, slippage tolerance, and cross-token settlement.
+- [**Payments Retry Queue**](payments-retry-queue.md) — Failed-debit retry lifecycle, retry scheduling/backoff, attempts, failed-debit records, early retry, abandonment, and recurring-invoice interaction.
 
 ---
 
