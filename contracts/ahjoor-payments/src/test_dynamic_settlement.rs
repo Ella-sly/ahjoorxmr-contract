@@ -124,6 +124,48 @@ fn test_create_payment_multi_token_success() {
 }
 
 #[test]
+fn test_get_dynamic_payment_and_slippage_tolerance() {
+    let (
+        env,
+        client,
+        _admin,
+        merchant,
+        _usdc_addr,
+        pay_token_addr,
+        _usdc_client,
+        usdc_admin_client,
+        _pay_token_client,
+        pay_token_admin_client,
+    ) = setup_multi_token();
+
+    let customer = Address::generate(&env);
+    pay_token_admin_client.mint(&customer, &10_000_000);
+    usdc_admin_client.mint(&client.address, &5_000_000);
+
+    // No slippage tolerance configured yet.
+    assert_eq!(client.get_merchant_slippage_tolerance(&merchant), None);
+    client.set_merchant_slippage_tolerance(&merchant, &75u32);
+    assert_eq!(client.get_merchant_slippage_tolerance(&merchant), Some(75u32));
+
+    // No dynamic payment yet for an arbitrary id.
+    assert_eq!(client.get_dynamic_payment(&999u32), None);
+
+    let pid = client.create_payment_multi_token(
+        &customer,
+        &merchant,
+        &1_000_000,
+        &pay_token_addr,
+        &Some(50u32),
+    );
+
+    let dynamic = client.get_dynamic_payment(&pid).unwrap();
+    assert_eq!(dynamic.payment_id, pid);
+    assert_eq!(dynamic.fiat_amount, 1_000_000);
+    assert_eq!(dynamic.token, pay_token_addr);
+    assert_eq!(dynamic.slippage_bps, 50u32);
+}
+
+#[test]
 #[should_panic(expected = "Oracle not configured")]
 fn test_create_payment_multi_token_requires_oracle_config() {
     let env = Env::default();

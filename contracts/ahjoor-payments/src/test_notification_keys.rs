@@ -330,3 +330,24 @@ fn test_notification_key_lifecycle() {
     client.remove_notification_key(&merchant);
     assert_eq!(client.get_notification_key(&merchant), None);
 }
+
+#[test]
+fn test_get_notification_key_history() {
+    let (env, _admin, _customer, merchant, _token, client) = setup_test_env();
+
+    // No rotations yet -> empty history.
+    assert_eq!(client.get_notification_key_history(&merchant).len(), 0);
+
+    let key1 = Bytes::from_array(&env, &[0xAA, 0xBB, 0xCC]);
+    client.register_notification_key(&merchant, &key1);
+    // Registering the first key does not create a prior-key history entry.
+    assert_eq!(client.get_notification_key_history(&merchant).len(), 0);
+
+    let key2 = Bytes::from_array(&env, &[0x11, 0x22, 0x33, 0x44]);
+    client.rotate_notification_key(&merchant, &key2);
+
+    // Rotating records the previous key in history.
+    let history = client.get_notification_key_history(&merchant);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().key, key1);
+}

@@ -86,6 +86,24 @@ fn test_escalate_to_dao() {
 }
 
 #[test]
+fn test_get_dao_vote() {
+    let (env, client, _admin, customer, _merchant, _token, payment_id) =
+        setup_with_payment();
+
+    let mediator = Address::generate(&env);
+    let non_voter = Address::generate(&env);
+    client.configure_dao(&vec![&env, mediator.clone(), non_voter.clone()], &86_400u64, &1u32);
+
+    let case_id = client.escalate_to_dao(&customer, &payment_id);
+
+    assert_eq!(client.get_dao_vote(&case_id, &mediator), None);
+
+    client.dao_vote(&mediator, &case_id, &true);
+    assert_eq!(client.get_dao_vote(&case_id, &mediator), Some(true));
+    assert_eq!(client.get_dao_vote(&case_id, &non_voter), None);
+}
+
+#[test]
 fn test_cancel_dao_escalation_before_votes() {
     let (env, client, _admin, customer, _merchant, _token, payment_id) =
         setup_with_payment();
