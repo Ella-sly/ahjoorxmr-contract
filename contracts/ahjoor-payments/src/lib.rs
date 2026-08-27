@@ -735,6 +735,23 @@ pub struct RecurringPaymentSchedule {
     pub active: bool,
 }
 
+/// #805: Lightweight recurring micro-tip subscription (independent of invoices).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TipSubscription {
+    pub id: u32,
+    pub customer: Address,
+    pub recipient: Address,
+    pub token: Address,
+    pub amount: i128,
+    /// Minimum ledgers between tip executions.
+    pub interval_ledgers: u32,
+    /// Absolute ledger sequence at or after which the next tip may execute.
+    pub next_due_ledger: u32,
+    pub active: bool,
+    pub executions: u32,
+}
+
 /// Per-merchant volume cap configuration (#131)
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1065,6 +1082,10 @@ pub enum DataKey3 {
     SubscriptionPlan(u32),
     /// Instance: when true, merchant KYB checks are enforced on payment creation.
     KYBRequired,
+    /// #805: counter for tip subscriptions
+    TipSubscriptionCounter,
+    /// #805: tip subscription record
+    TipSubscription(u32),
 }
 
 mod events;
@@ -10655,6 +10676,163 @@ impl AhjoorPaymentsContract {
             .get(&DataKey3::DaoMembers)
             .unwrap_or(Vec::new(&env))
     }
+
+    // ── #805: Recurring Micro-Tip Subscriptions ───────────────────────────────
+
+    /// Create a lightweight tip subscription independent of invoice/payment flows.
+    /// Customer must approve token allowance for relayer-executed tips via `transfer_from`.
+    pub fn create_tip_subscription(
+        env: Env,
+        customer: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        interval_ledgers: u32,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        if amount <= 0 {
+            panic!("Tip amount must be positive");
+        }
+        if interval_ledgers == 0 {
+            panic!("Tip interval must be positive");
+        }
+
+        Self::require_token_allowed(&env, &token);
+
+        let mut counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::TipSubscriptionCounter)
+            .unwrap_or(0);
+        let sub_id = counter;
+        counter += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey3::TipSubscriptionCounter, &counter);
+
+        let now_ledger = env.ledger().sequence();
+        let sub = TipSubscription {
+            id: sub_id,
+            customer: customer.clone(),
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount,
+            interval_ledgers,
+            next_due_ledger: now_ledger,
+            active: true,
+            executions: 0,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::TipSubscription(sub_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::TipSubscription(sub_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_tip_subscription_created(&env, sub_id, customer, recipient, amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        sub_id
+    }
+
+    /// Execute a due tip. Callable by anyone once `ledger.sequence >= next_due_ledger`.
+    /// Transfers `amount` from customer to recipient via token allowance.
+    pub fn execute_due_tip(env: Env, subscription_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut sub: TipSubscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::TipSubscription(subscription_id))
+            .expect("Tip subscription not found");
+
+        if !sub.active {
+            panic!("Tip subscription is not active");
+        }
+
+        let now_ledger = env.ledger().sequence();
+        if now_ledger < sub.next_due_ledger {
+            panic!("Tip interval has not elapsed");
+        }
+
+        let client = token::Client::new(&env, &sub.token);
+        client.transfer_from(
+            &env.current_contract_address(),
+            &sub.customer,
+            &sub.recipient,
+            &sub.amount,
+        );
+
+        sub.executions += 1;
+        sub.next_due_ledger = now_ledger + sub.interval_ledgers;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::TipSubscription(subscription_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::TipSubscription(subscription_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_tip_executed(
+            &env,
+            subscription_id,
+            sub.executions,
+            sub.amount,
+            sub.next_due_ledger,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Cancel a tip subscription. Only the customer may cancel.
+    pub fn cancel_tip_subscription(env: Env, customer: Address, subscription_id: u32) {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        let mut sub: TipSubscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::TipSubscription(subscription_id))
+            .expect("Tip subscription not found");
+
+        if customer != sub.customer {
+            panic!("Only the tip customer can cancel");
+        }
+        if !sub.active {
+            panic!("Tip subscription is already cancelled");
+        }
+
+        sub.active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey3::TipSubscription(subscription_id), &sub);
+
+        events::emit_tip_subscription_cancelled(&env, subscription_id, customer);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Read a tip subscription record.
+    pub fn get_tip_subscription(env: Env, subscription_id: u32) -> TipSubscription {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::TipSubscription(subscription_id))
+            .expect("Tip subscription not found")
+    }
 }
 
 #[cfg(test)]
@@ -10662,6 +10840,9 @@ mod test_disputes_by_merchant;
 
 #[cfg(test)]
 mod test_tip;
+
+#[cfg(test)]
+mod test_tip_subscription;
 
 #[cfg(test)]
 mod test_consent;
