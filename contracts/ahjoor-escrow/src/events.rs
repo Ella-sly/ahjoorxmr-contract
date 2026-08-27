@@ -1845,3 +1845,51 @@ pub struct FeesWithdrawn {
 pub fn emit_fees_withdrawn(e: &Env, amount: i128, destination: Address) {
     FeesWithdrawn { amount, destination }.publish(e);
 }
+
+// ── #800 Work Authorization ───────────────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct WorkAuthorized {
+    pub escrow_id: u32,
+}
+
+pub fn emit_work_authorized(e: &Env, escrow_id: u32) {
+    WorkAuthorized { escrow_id }.publish(e);
+}
+
+// ── #797 Creation Bond ────────────────────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CreationBondRefunded {
+    pub escrow_id: u32,
+    pub buyer: Address,
+    pub amount: i128,
+}
+
+pub fn emit_creation_bond_refunded(e: &Env, escrow_id: u32, buyer: Address, amount: i128) {
+    CreationBondRefunded {
+        escrow_id,
+        buyer,
+        amount,
+    }
+    .publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AbandonmentBondClaimed {
+    pub escrow_id: u32,
+    pub seller: Address,
+    pub amount: i128,
+}
+
+pub fn emit_abandonment_bond_claimed(e: &Env, escrow_id: u32, seller: Address, amount: i128) {
+    AbandonmentBondClaimed {
+        escrow_id,
+        seller,
+        amount,
+    }
+    .publish(e);
+}
