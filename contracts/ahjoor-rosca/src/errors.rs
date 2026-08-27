@@ -210,4 +210,14 @@ pub enum ExtError2 {
     RoundPendingFinalization = 119,
     /// Slot swap not found for the given id (#748).
     SwapNotFound = 120,
+    /// Voluntary exit notice period has not elapsed yet (#792).
+    ExitNoticeNotElapsed = 121,
+    /// No pending voluntary exit request for this member (#792).
+    NoVoluntaryExitRequest = 122,
+    /// Member already has a pending voluntary exit request (#792).
+    VoluntaryExitPending = 123,
+    /// num_rounds must be positive for prepay (#790).
+    InvalidPrepayRounds = 124,
+    /// Insufficient prepaid balance to withdraw (#790).
+    InsufficientPrepaidBalance = 125,
 }

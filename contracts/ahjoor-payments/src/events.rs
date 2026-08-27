@@ -173,6 +173,13 @@ pub struct PaymentCaptured {
     pub amount: i128,
 }
 
+/// Event: Customer cancelled an authorized payment before capture (#803)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentCancelledByCustomer {
+    pub payment_id: u32,
+}
+
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct CustomerBlocked {
@@ -566,6 +573,10 @@ pub fn emit_payment_expiry_override(e: &Env, payment_id: u32, expiry_seconds: u6
 
 pub fn emit_payment_captured(e: &Env, payment_id: u32, amount: i128) {
     PaymentCaptured { payment_id, amount }.publish(e);
+}
+
+pub fn emit_payment_cancelled_by_customer(e: &Env, payment_id: u32) {
+    PaymentCancelledByCustomer { payment_id }.publish(e);
 }
 
 pub fn emit_payment_partial_refund(
