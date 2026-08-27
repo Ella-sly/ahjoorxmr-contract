@@ -170,3 +170,112 @@ fn test_wrong_proxy_cannot_contribute() {
     // Impostor tries to contribute — should fail
     client.contribute_via_proxy(&impostor, &member, &token, &1_000i128);
 }
+
+#[test]
+fn test_multiple_members_can_have_different_proxies() {
+    let env = Env::default();
+    let member_a = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let proxy_a = Address::generate(&env);
+    let proxy_b = Address::generate(&env);
+    let (client, _admin, _token, _) = setup_rosca(&env, &[member_a.clone(), member_b.clone()]);
+
+    let expiry = (env.ledger().sequence() as u64) + 1_000;
+    client.delegate_contribution_rights(&member_a, &0u32, &proxy_a, &expiry);
+    client.delegate_contribution_rights(&member_b, &0u32, &proxy_b, &expiry);
+
+    let rec_a = client.get_member_delegation(&0u32, &member_a).unwrap();
+    let rec_b = client.get_member_delegation(&0u32, &member_b).unwrap();
+
+    assert_eq!(rec_a.proxy, proxy_a);
+    assert_eq!(rec_b.proxy, proxy_b);
+}
+
+#[test]
+fn test_delegation_with_zero_expiry_is_immediate() {
+    let env = Env::default();
+    let member = Address::generate(&env);
+    let proxy = Address::generate(&env);
+    let (client, _admin, _token, _) = setup_rosca(&env, &[member.clone()]);
+
+    // Set expiry to current ledger sequence (immediate expiration)
+    let expiry = env.ledger().sequence() as u64;
+    client.delegate_contribution_rights(&member, &0u32, &proxy, &expiry);
+
+    let rec = client.get_member_delegation(&0u32, &member).unwrap();
+    assert_eq!(rec.expiry, expiry);
+}
+
+#[test]
+#[should_panic]
+fn test_proxy_cannot_contribute_after_revocation() {
+    let env = Env::default();
+    let member = Address::generate(&env);
+    let proxy = Address::generate(&env);
+    let (client, _admin, token, contract_id) = setup_rosca(&env, &[member.clone()]);
+
+    let token_admin = TokenAdminClient::new(&env, &token);
+    let token_client = TokenClient::new(&env, &token);
+
+    token_admin.mint(&proxy, &5_000);
+    token_client.approve(&proxy, &contract_id, &5_000, &(env.ledger().sequence() + 10_000));
+    token_client.approve(&member, &proxy, &5_000, &(env.ledger().sequence() + 10_000));
+
+    let expiry = (env.ledger().sequence() as u64) + 1_000;
+    client.delegate_contribution_rights(&member, &0u32, &proxy, &expiry);
+
+    // Revoke delegation
+    client.revoke_contribution_delegation(&member, &0u32);
+
+    // Proxy tries to contribute after revocation — should fail
+    client.contribute_via_proxy(&proxy, &member, &token, &1_000i128);
+}
+
+#[test]
+fn test_delegation_can_be_extended() {
+    let env = Env::default();
+    let member = Address::generate(&env);
+    let proxy = Address::generate(&env);
+    let (client, _admin, _token, _) = setup_rosca(&env, &[member.clone()]);
+
+    let initial_expiry = (env.ledger().sequence() as u64) + 500;
+    client.delegate_contribution_rights(&member, &0u32, &proxy, &initial_expiry);
+
+    let rec = client.get_member_delegation(&0u32, &member).unwrap();
+    assert_eq!(rec.expiry, initial_expiry);
+
+    // Extend delegation with new expiry
+    let extended_expiry = (env.ledger().sequence() as u64) + 2_000;
+    client.delegate_contribution_rights(&member, &0u32, &proxy, &extended_expiry);
+
+    let rec_extended = client.get_member_delegation(&0u32, &member).unwrap();
+    assert_eq!(rec_extended.expiry, extended_expiry);
+    assert_eq!(rec_extended.proxy, proxy);
+}
+
+#[test]
+fn test_same_proxy_can_serve_multiple_members() {
+    let env = Env::default();
+    let member_a = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let member_c = Address::generate(&env);
+    let shared_proxy = Address::generate(&env);
+    let (client, _admin, _token, _) = setup_rosca(&env, &[
+        member_a.clone(),
+        member_b.clone(),
+        member_c.clone()
+    ]);
+
+    let expiry = (env.ledger().sequence() as u64) + 1_000;
+    client.delegate_contribution_rights(&member_a, &0u32, &shared_proxy, &expiry);
+    client.delegate_contribution_rights(&member_b, &0u32, &shared_proxy, &expiry);
+    client.delegate_contribution_rights(&member_c, &0u32, &shared_proxy, &expiry);
+
+    let rec_a = client.get_member_delegation(&0u32, &member_a).unwrap();
+    let rec_b = client.get_member_delegation(&0u32, &member_b).unwrap();
+    let rec_c = client.get_member_delegation(&0u32, &member_c).unwrap();
+
+    assert_eq!(rec_a.proxy, shared_proxy);
+    assert_eq!(rec_b.proxy, shared_proxy);
+    assert_eq!(rec_c.proxy, shared_proxy);
+}
