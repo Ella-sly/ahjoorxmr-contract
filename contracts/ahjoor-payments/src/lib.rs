@@ -2859,12 +2859,26 @@ impl AhjoorPaymentsContract {
             .expect("Oracle not configured")
     }
 
+    /// Return the oracle-locked pricing snapshot for a dynamic payment, if one exists.
+    pub fn get_dynamic_payment(env: Env, payment_id: u32) -> Option<DynamicPayment> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::DynamicPayment(payment_id))
+    }
+
     // --- Admin ---
 
     pub fn set_merchant_slippage_tolerance(env: Env, merchant: Address, bps: u32) {
         Self::require_not_paused(&env);
         merchant.require_auth();
         env.storage().persistent().set(&DataKey3::SlippageToleranceBps(merchant), &bps);
+    }
+
+    /// Return a merchant's configured slippage tolerance in basis points, if set.
+    pub fn get_merchant_slippage_tolerance(env: Env, merchant: Address) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::SlippageToleranceBps(merchant))
     }
 
     pub fn set_max_batch_size(env: Env, new_size: u32) {
@@ -4917,6 +4931,17 @@ impl AhjoorPaymentsContract {
         }
 
         None
+    }
+
+    /// Return the full notification key rotation history for a merchant.
+    pub fn get_notification_key_history(
+        env: Env,
+        merchant: Address,
+    ) -> soroban_sdk::Vec<NotificationKeyEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::NotificationKeyHistory(merchant))
+            .unwrap_or(soroban_sdk::Vec::new(&env))
     }
 
     /// Set the notification key rotation overlap window (admin only).
@@ -10574,6 +10599,13 @@ impl AhjoorPaymentsContract {
             .persistent()
             .get(&DataKey3::DaoMediationCase(case_id))
             .expect("Mediation case not found")
+    }
+
+    /// Return how (or whether) a specific DAO member voted on a mediation case.
+    pub fn get_dao_vote(env: Env, case_id: u32, voter: Address) -> Option<bool> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::DaoMediationVote(case_id, voter))
     }
 
     /// Return the DAO mediation case for `payment_id`, if one exists.

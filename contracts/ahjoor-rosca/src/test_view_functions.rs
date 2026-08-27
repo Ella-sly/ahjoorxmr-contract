@@ -228,3 +228,53 @@ fn test_get_quorum_for_type_custom_and_defaults() {
         5100
     );
 }
+
+// ─── #747: get_co_signer_window ────────────────────────────────────────────
+
+#[test]
+fn test_get_co_signer_window_defaults_and_reflects_set_value() {
+    let (_env, client, admin, _token_addr, _members) = setup_with_members(3, false, 0);
+
+    // No window configured yet -> falls back to the same default used
+    // internally (0).
+    assert_eq!(client.get_co_signer_window(), 0);
+
+    client.set_co_signer_window(&admin, &500u32);
+    assert_eq!(client.get_co_signer_window(), 500);
+}
+
+// ─── #752: get_round_duration_bounds / get_pending_round_duration ─────────
+
+#[test]
+fn test_round_duration_getters_before_and_after_set() {
+    let (_env, client, admin, _token_addr, _members) = setup_with_members(3, false, 0);
+
+    // Before any configuration: defaults used internally by
+    // update_round_duration, and no pending change.
+    assert_eq!(client.get_round_duration_bounds(), (60, u64::MAX));
+    assert_eq!(client.get_pending_round_duration(), None);
+
+    client.set_round_duration_bounds(&admin, &3600u64, &86400u64);
+    assert_eq!(client.get_round_duration_bounds(), (3600, 86400));
+    assert_eq!(client.get_pending_round_duration(), None);
+
+    client.update_round_duration(&admin, &7200u64);
+    assert_eq!(client.get_round_duration_bounds(), (3600, 86400));
+    assert_eq!(client.get_pending_round_duration(), Some(7200));
+}
+
+// ─── #753: get_treasury_config ─────────────────────────────────────────────
+
+#[test]
+fn test_get_treasury_config_none_until_enabled() {
+    let (_env, client, admin, _token_addr, _members) = setup_with_members(3, false, 0);
+
+    assert_eq!(client.get_treasury_config(), None);
+
+    let treasury_admin = admin.clone();
+    client.enable_group_treasury(&admin, &treasury_admin);
+
+    let config = client.get_treasury_config().unwrap();
+    assert_eq!(config.treasury_admin, treasury_admin);
+    assert_eq!(config.enabled, true);
+}

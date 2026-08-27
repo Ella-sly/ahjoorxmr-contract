@@ -14,12 +14,14 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 
 ## 2. ROSCA Contract (`ahjoor-rosca`)
 
+- [**Contribution Receipts in ROSCA**](rosca-contribution-receipts.md) — NFT-style contribution receipt data format, automatic minting on round finalization, event emissions, and member retrieval/verification functions.
 - [**Cosigner Guarantee in ROSCA**](rosca-cosigner-guarantee.md) — Overview of co-signer nomination, acceptance, and default coverage logic for community savings groups.
 - [**Contribution Delegation in ROSCA**](rosca-contribution-delegation.md) — Overview of contribution and voting weight delegation, proxy execution, limits, and revocation.
 - [**Co-Payer Contribution Splitting in ROSCA**](rosca-co-payer-splitting.md) — How co-payers are registered for a member's slot, how the split ratio is set and enforced, and what happens if a co-payer fails to contribute.
 - [**Weighted Voting in ROSCA Governance**](rosca-weighted-voting.md) — How a member's vote weight is computed from round contributions, applied during proposal voting, and tallied against dynamic quorum thresholds vs. equal voting.
 - [**ROSCA Group Split Flow**](rosca-group-split.md) — Proposal creation, member assignment and confirmation, expiry handling, execution, refunds, and resulting group identifiers.
 - [**ROSCA Reinvestment Flow**](rosca-reinvestment.md) — How a member rolls a round payout forward into the next round as their contribution, the deadline constraint, and how over/under-payment is handled.
+- [**ROSCA Group Snapshots**](rosca-snapshot.md) — Snapshot creation, captured group state, immutable audit records, and the recovery process.
 
 ---
 
@@ -39,7 +41,7 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 - [**Merchant Referral Program**](payments-referral.md) — Referral registration, commission calculation on platform fees, accrual windows, and claiming.
 - [**DAO Mediation for Disputed Payments**](dao-mediation.md) — On-chain DAO voting and resolution process for disputed merchant payments.
 - [**Multi-Token Invoice**](multi-token-invoice.md) — Guide to multi-token invoicing, oracle-based price feeds, slippage tolerance, and cross-token settlement.
-- [**Payments Retry Queue**](payments-retry-queue.md) — Failed-debit retry lifecycle, retry scheduling/backoff, attempts, failed-debit records, early retry, abandonment, and recurring-invoice interaction.
+- [**Merchant Ban and Suspension Flow**](payments-merchant-ban.md) — Suspension and ban triggers, merchant appeals, reinstatement cooling-off, and re-appeal cooldowns.
 
 ---
 
