@@ -21,7 +21,7 @@
 //! that relay nodes and indexers use when decoding errors across contracts.
 
 // ---------------------------------------------------------------------------
-// ahjoor-rosca (1000–1299)
+// ahjoor-rosca (1000–1299) 
 // ---------------------------------------------------------------------------
 
 pub mod rosca {
@@ -1009,7 +1009,7 @@ mod tests {
     /// that count against how many `ALL_ERRORS` entries are tagged for that
     /// contract. If someone adds a new error code, they must also bump the
     /// module's `COUNT` and add an `ALL_ERRORS` entry — if either step is
-    /// skipped, this test fails.
+    /// skipped, this test fails. 
     #[test]
     fn all_errors_covers_every_module_const() {
         let expected: &[(&str, usize)] = &[

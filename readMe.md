@@ -21,7 +21,7 @@ ROSCAs are one of the oldest and most widely used savings systems in the world, 
 - **Tanda** – Latin American ROSCA
 - **Chit Fund** – South Asian, often formalized and legally regulated ROSCA
 
-## Use Cases
+## Use Cases 
 
 - Community savings circles (Ajo, Esusu, Susu, Tanda, Chit Funds)
 - Corporate employee savings programs

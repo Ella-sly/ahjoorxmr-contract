@@ -23,16 +23,16 @@ fn setup_test() -> (Env, Address, TokenWhitelistContractClient<'static>) {
 fn test_initialize() {
     let (env, admin, client) = setup_test();
 
-    // Verify admin is set
+    /// Verify admin is set
     assert_eq!(client.get_admin(), admin);
 
-    // Verify whitelist is empty initially
+    /// Verify whitelist is empty initially
     let tokens = client.get_whitelisted_tokens();
     assert_eq!(tokens.len(), 0);
 
-    // Check initialization event
+    /// Check initialization event
     let events = env.events().all();
-    // Just verify the contract works, events can be tested separately
+    /// Just verify the contract works, events can be tested separately
 }
 
 #[test]
