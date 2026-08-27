@@ -113,6 +113,16 @@ pub struct ExitRequest {
     pub approved: bool,
 }
 
+/// Pending voluntary exit with a deferred effective ledger (#792).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoluntaryExitRequest {
+    /// Ledger sequence at which `finalize_voluntary_exit` becomes callable.
+    pub effective_ledger: u32,
+    /// Round snapshot at request time (used for penalty computation on finalize).
+    pub rounds_contributed: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemberStatus {
@@ -305,6 +315,12 @@ pub enum DataKey4 {
     UnfinalizedRoundStreak = 100,
     /// Insurance pool low-balance alert threshold.
     InsurancePoolLowThreshold = 101,
+    /// Admin-configured notice period (ledgers) before voluntary exit takes effect (#792).
+    ExitNoticeLedgers = 102,
+    /// Pending voluntary exit requests: Map<Address, VoluntaryExitRequest> (#792).
+    VoluntaryExitRequests = 103,
+    /// Per-member prepaid contribution balance: Map<Address, i128> (#790).
+    PrepaidBalances = 104,
 }
 
 /// Waitlist ordering mode (#456).

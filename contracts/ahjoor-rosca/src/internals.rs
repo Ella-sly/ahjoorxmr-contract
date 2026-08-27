@@ -668,6 +668,97 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
     }
 
     events::emit_reset(env, current_round);
+
+    // #790: auto-draw prepaid balances for the newly opened round
+    apply_prepaid_contributions(env);
+}
+
+/// Consume prepaid balances to mark unpaid members as contributed for the current round (#790).
+pub(crate) fn apply_prepaid_contributions(env: &Env) {
+    let members: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::Members)
+        .unwrap_or(Vec::new(env));
+    for member in members.iter() {
+        apply_prepaid_for_member(env, &member);
+    }
+}
+
+pub(crate) fn apply_prepaid_for_member(env: &Env, member: &Address) {
+    let paid_members: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaidMembers)
+        .unwrap_or(Vec::new(env));
+    if paid_members.contains(member) {
+        return;
+    }
+
+    let contribution_amount: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ContributionAmt)
+        .unwrap_or(0);
+    let tiers: Map<Address, u32> = env
+        .storage()
+        .instance()
+        .get(&DataKey2::MemberTiers)
+        .unwrap_or(Map::new(env));
+    let tier_bps = tiers.get(member.clone()).unwrap_or(10_000);
+    let member_required = (contribution_amount * tier_bps as i128) / 10_000;
+    if member_required <= 0 {
+        return;
+    }
+
+    let mut prepaid: Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&DataKey4::PrepaidBalances)
+        .unwrap_or(Map::new(env));
+    let balance = prepaid.get(member.clone()).unwrap_or(0);
+
+    let mut member_contributions: Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&DataKey::MemberContributions)
+        .unwrap_or(Map::new(env));
+    let already_paid = member_contributions.get(member.clone()).unwrap_or(0);
+    let remaining_needed = member_required - already_paid;
+    if remaining_needed <= 0 {
+        return;
+    }
+    if balance < remaining_needed {
+        return;
+    }
+
+    let new_balance = balance - remaining_needed;
+    if new_balance == 0 {
+        prepaid.remove(member.clone());
+    } else {
+        prepaid.set(member.clone(), new_balance);
+    }
+    env.storage()
+        .instance()
+        .set(&DataKey4::PrepaidBalances, &prepaid);
+
+    member_contributions.set(member.clone(), member_required);
+    env.storage()
+        .instance()
+        .set(&DataKey::MemberContributions, &member_contributions);
+
+    let mut next_paid = paid_members;
+    next_paid.push_back(member.clone());
+    env.storage()
+        .instance()
+        .set(&DataKey::PaidMembers, &next_paid);
+
+    let current_round: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::CurrentRound)
+        .unwrap_or(0);
+    events::emit_prepaid_consumed(env, member.clone(), current_round, remaining_needed);
 }
 
 /// Resets a member's default count and removes them from the suspended list.

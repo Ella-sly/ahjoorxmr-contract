@@ -228,6 +228,14 @@ pub enum ExtError {
     InvalidAmount = 71,
     /// Merchant has KYB on record, but it is now expired.
     MerchantKYBExpired = 72,
+    /// Merchant has reached the configured max invoice count for the current period (#804).
+    MerchantInvoiceCapExceeded = 73,
+    /// Caller is not the payment's customer (#803).
+    NotPaymentCustomer = 74,
+    /// Payment is not in Authorized status for customer cancellation (#803).
+    NotAuthorizedForCancel = 75,
+    /// Capture deadline has passed; customer can no longer cancel (#803).
+    CancelPastCaptureDeadline = 76,
 }
 
 /// Per-merchant withdrawal rate limit config (#231).
@@ -387,6 +395,8 @@ pub enum PaymentStatus {
     CancelledInCoolingOff = 9,
     /// Dispute has exceeded the escalation timeout and is awaiting priority resolution (#417)
     EscalatedDispute = 10,
+    /// Customer cancelled an authorized payment before merchant capture (#803)
+    CustomerCancelled = 11,
 }
 
 #[contracttype]
@@ -743,6 +753,22 @@ pub struct VolumeCap {
     pub window_seconds: u64,
 }
 
+/// Per-merchant max invoice count configuration (#804).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceCountCap {
+    pub period_ledgers: u32,
+    pub max_count: u32,
+}
+
+/// Rolling invoice-count window state for a merchant (#804).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceCountWindow {
+    pub count: u32,
+    pub window_start: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomerRateLimit {
@@ -1065,6 +1091,10 @@ pub enum DataKey3 {
     SubscriptionPlan(u32),
     /// Instance: when true, merchant KYB checks are enforced on payment creation.
     KYBRequired,
+    /// Persistent: per-merchant max invoices per billing period config (#804)
+    InvoiceCountCap(Address),
+    /// Persistent: rolling invoice count window state per merchant (#804)
+    InvoiceCountWindow(Address),
 }
 
 mod events;
@@ -1397,6 +1427,7 @@ impl AhjoorPaymentsContract {
         }
 
         Self::enforce_rate_limit(&env, &customer, 1);
+        Self::enforce_merchant_invoice_cap(&env, &merchant);
 
         if amount <= 0 {
             panic!("Payment amount must be positive");
@@ -3316,6 +3347,60 @@ impl AhjoorPaymentsContract {
         env.storage()
             .persistent()
             .get(&DataKey::VolumeCap(merchant))
+    }
+
+    /// Admin sets a rolling max invoice count for a merchant within `period_ledgers` (#804).
+    /// Set `max_count = 0` to remove the cap (merchant unrestricted).
+    pub fn set_max_invoices_per_period(
+        env: Env,
+        admin: Address,
+        merchant: Address,
+        period_ledgers: u32,
+        max_count: u32,
+    ) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        if max_count > 0 && period_ledgers == 0 {
+            panic!("period_ledgers must be positive when cap is set");
+        }
+
+        let cap_key = DataKey3::InvoiceCountCap(merchant.clone());
+        let window_key = DataKey3::InvoiceCountWindow(merchant.clone());
+
+        if max_count == 0 {
+            env.storage().persistent().remove(&cap_key);
+            env.storage().persistent().remove(&window_key);
+        } else {
+            env.storage().persistent().set(
+                &cap_key,
+                &InvoiceCountCap {
+                    period_ledgers,
+                    max_count,
+                },
+            );
+            env.storage().persistent().extend_ttl(
+                &cap_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the current invoice-count window for a merchant (#804).
+    /// Merchants without a configured cap return a zeroed window.
+    pub fn get_invoice_count_window(env: Env, merchant: Address) -> InvoiceCountWindow {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::InvoiceCountWindow(merchant))
+            .unwrap_or(InvoiceCountWindow {
+                count: 0,
+                window_start: 0,
+            })
     }
 
     /// Propose a new admin address. Only the current admin can propose.
@@ -6513,6 +6598,66 @@ impl AhjoorPaymentsContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Customer self-service cancellation of an authorized payment before merchant capture (#803).
+    /// Transitions to `CustomerCancelled` and refunds escrow. Rejected once captured, expired,
+    /// past `capture_deadline`, or called by a non-owning address.
+    pub fn cancel_payment(env: Env, customer: Address, payment_id: u32) {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        let mut payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+
+        if payment.customer != customer {
+            panic_with_error!(&env, ExtError::NotPaymentCustomer);
+        }
+        if payment.status != PaymentStatus::Authorized {
+            panic_with_error!(&env, ExtError::NotAuthorizedForCancel);
+        }
+        if payment.capture_deadline == 0
+            || (env.ledger().sequence() as u64) >= payment.capture_deadline
+        {
+            panic_with_error!(&env, ExtError::CancelPastCaptureDeadline);
+        }
+
+        let refund_amount = payment.amount - payment.refunded_amount;
+        if refund_amount > 0 {
+            let client = token::Client::new(&env, &payment.token);
+            client.transfer(
+                &env.current_contract_address(),
+                &payment.customer,
+                &refund_amount,
+            );
+            payment.refunded_amount = payment.amount;
+        }
+
+        let old_status = payment.status;
+        payment.status = PaymentStatus::CustomerCancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Payment(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_payment_cancelled_by_customer(&env, payment_id);
+        events::emit_payment_status_changed(
+            &env,
+            payment_id,
+            old_status,
+            PaymentStatus::CustomerCancelled,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     /// Execute a token swap via the configured DEX router.
     /// Returns the output amount or an error symbol.
     /// Internal: if a DynamicPayment record exists for this payment, validate expiry.
@@ -7127,6 +7272,44 @@ impl AhjoorPaymentsContract {
         env.storage().persistent().set(&key, &state);
         env.storage().persistent().extend_ttl(
             &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Enforce rolling per-merchant invoice count cap (#804). No-op when unset.
+    fn enforce_merchant_invoice_cap(env: &Env, merchant: &Address) {
+        let cap_key = DataKey3::InvoiceCountCap(merchant.clone());
+        let cap: InvoiceCountCap = match env.storage().persistent().get(&cap_key) {
+            Some(c) => c,
+            None => return,
+        };
+
+        let current_ledger = env.ledger().sequence();
+        let window_key = DataKey3::InvoiceCountWindow(merchant.clone());
+        let mut window: InvoiceCountWindow =
+            env.storage()
+                .persistent()
+                .get(&window_key)
+                .unwrap_or(InvoiceCountWindow {
+                    count: 0,
+                    window_start: current_ledger,
+                });
+
+        if current_ledger.saturating_sub(window.window_start) >= cap.period_ledgers {
+            window.count = 0;
+            window.window_start = current_ledger;
+        }
+
+        let new_count = window.count.saturating_add(1);
+        if new_count > cap.max_count {
+            panic_with_error!(env, ExtError::MerchantInvoiceCapExceeded);
+        }
+
+        window.count = new_count;
+        env.storage().persistent().set(&window_key, &window);
+        env.storage().persistent().extend_ttl(
+            &window_key,
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
@@ -10700,6 +10883,12 @@ mod test_oracle_staleness;
 mod test_dao_mediation;
 #[cfg(test)]
 mod test_kyb;
+
+#[cfg(test)]
+mod test_invoice_cap;
+
+#[cfg(test)]
+mod test_customer_cancel;
 
 #[cfg(test)]
 mod test;
