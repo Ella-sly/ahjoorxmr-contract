@@ -2859,6 +2859,15 @@ impl AhjoorRefundContract {
             .expect("Payment contract not configured")
     }
 
+    /// Get the maximum batch size for batch refund operations.
+    /// Returns the configured max batch size or the default if not set.
+    pub fn get_max_batch_size(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxBatchSize)
+            .unwrap_or(DEFAULT_MAX_BATCH_SIZE)
+    }
+
     /// Upgrade this contract's WASM code. Admin only.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         admin.require_auth();

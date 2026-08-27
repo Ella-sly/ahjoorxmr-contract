@@ -3899,6 +3899,15 @@ impl AhjoorEscrowContract {
         (fee_bps, fee_recipient)
     }
 
+    /// Get accumulated protocol fees for a given token.
+    /// Returns the amount of fees accrued and awaiting withdrawal.
+    pub fn get_accrued_fees(env: Env, token: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::AccruedFees(token))
+            .unwrap_or(0)
+    }
+
     /// Withdraw accumulated protocol fees for a given token. Admin only.
     /// Emits a FeesWithdrawn event on success.
     /// Panics if amount is zero, exceeds the accrued balance, or caller is not admin.
