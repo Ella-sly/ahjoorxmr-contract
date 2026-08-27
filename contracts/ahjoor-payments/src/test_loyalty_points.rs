@@ -21,7 +21,8 @@ fn setup_loyalty<'a>() -> (Env, AhjoorPaymentsContractClient<'a>, Address, Addre
     client.approve_merchant(&merchant);
 
     // Configure loyalty: 1 point per 1_000_000 units, 100 bps per point, floor 10
-    client.configure_loyalty(&admin, &1u32, &100u32, &10i128, &0u32);
+   // Configure loyalty: 1 point per 1_000_000 units, 100 bps per point, floor 10
+     client.configure_loyalty(&admin, &1u32, &100u32, &10i128, &0u32);
 
     // Mint tokens to a customer
     let customer = Address::generate(&env);
@@ -31,6 +32,7 @@ fn setup_loyalty<'a>() -> (Env, AhjoorPaymentsContractClient<'a>, Address, Addre
 }
 
 fn token_addr_from_setup(env: &Env, admin: &Address) -> Address {
+    // Re-derive token address — in tests we need to pass it around
     // Re-derive token address — in tests we need to pass it around
     // We'll just use a helper that creates a payment and returns the token
     let _ = env;
@@ -83,6 +85,7 @@ fn test_full_redemption() {
     client.complete_payment(&payment_id);
     assert_eq!(client.get_loyalty_points_balance(&customer), 10);
 
+    // Create a new payment and redeem all 10 points
     // Create a new payment and redeem all 10 points
     // discount = 10 * 100 / 10_000 = 0.1 per unit → 10 * 100 bps = 1000 bps of... wait
     // discount = points * redemption_rate_bps / 10_000 = 10 * 100 / 10_000 = 0 (integer)
@@ -199,6 +202,7 @@ fn test_non_transferability() {
 }
 
 #[test]
+// Full refund via dispute_resolve: dispute a new pending payment for the same amount
 fn test_points_reversed_on_refund() {
     // 1 point per 1_000_000 units
     let (env, client, admin, merchant, customer, token_addr) = setup_loyalty_with_token();
