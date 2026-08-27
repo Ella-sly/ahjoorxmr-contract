@@ -7963,6 +7963,13 @@ impl AhjoorPaymentsContract {
             .unwrap_or(MerchantStatus::Active)
     }
 
+    /// Get the timestamp at which a merchant's suspension expires, if any.
+    pub fn get_merchant_suspension_expiry(env: Env, merchant: Address) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::MerchantSuspensionExpiry(merchant))
+    }
+
     /// Get the active appeal for a merchant, if any.
     pub fn get_merchant_appeal(env: Env, merchant: Address) -> Option<MerchantAppeal> {
         env.storage()
