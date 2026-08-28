@@ -49,5 +49,6 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 
 ## 5. Refund Contract (`ahjoor-refund`)
 
-- [**Refund Contract Guide**](refund.md) — Refund request, approval, and claim workflows, senior arbiter escalation, and customer abuse score tracking.
+- [**Refund Contract Guide**](refund.md) — Refund request, approval, and claim workflows, deadline boundary enforcement, senior arbiter escalation, and customer abuse score tracking.
 - [**Merchant Reserve Fund**](reserve-fund.md) — Refund contract merchant reserve balances and how they are tracked and used.
+

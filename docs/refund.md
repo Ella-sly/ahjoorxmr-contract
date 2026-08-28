@@ -24,7 +24,12 @@ Refund issuance is typically created when an upstream contract (e.g., `ahjoor-es
 
 - `create_refund(refund_id, owner, amount, metadata)` — (internal / called by originating contracts) create a refund record (used for automatic creation on cancellation).
 
-- `get_refund(refund_id) -> Refund` — view refund record and status (`Pending`, `Approved`, `Claimed`, `Cancelled`).
+- `auto_reject_stale_refund(refund_id)` — permissionlessly auto-rejects unhandled refund requests after the configured auto-reject window (plus extensions) has elapsed, returning escrowed tokens to the customer.
+
+- `extend_refund_deadline(admin, refund_id, extra_seconds)` — admin-only function to extend the auto-reject deadline for an active refund request.
+
+- `get_refund(refund_id) -> Refund` — view refund record and status (`Pending`, `Approved`, `Claimed`, `Cancelled`, `Rejected`, `CounterOffered`).
+
 
 ## Typical flow
 
@@ -39,8 +44,115 @@ Alternate shorter flow (automatic approval): some flows can be configured so tha
 
 - Approval-to-claim window: the contract may enforce a time window (e.g., 30 days) within which the claimant must call `claim_refund` after approval. After the window expires the refund may be moved to `Expired` and require admin re-approval.
 - Claim timelock: some refunds may include an optional timelock preventing claims until a given epoch (useful for dispute cooling-off).
+- Stale refund auto-reject window: unhandled requests in `Requested` status beyond the configured window (plus any admin-granted extensions) can be auto-rejected permissionlessly.
+- Customer cancel window: participants can auto-cancel unhandled requests after the cancellation window elapses.
 
 Check the contract configuration constants for the exact timeouts used in the deployed instance.
+
+## Refund Deadline Boundary Enforcement
+
+The `ahjoor-refund` contract enforces deterministic timeout and deadline boundaries across every refund lifecycle stage. Aligned with the cross-contract timeout convention (#553), all permissionless-after-timeout functions enforce an **exclusive boundary** rule.
+
+### Boundary Convention and Exact Expiration Rules
+
+In Soroban ledger timekeeping, all timeout checks are evaluated against the current ledger timestamp (`now = env.ledger().timestamp()`):
+
+- **Exclusive Boundary Invariant:** A timeout or deadline window is considered elapsed **only** when the current ledger timestamp is strictly greater than the computed deadline (`now > deadline`).
+- **Exact-Boundary Evaluation (`now == deadline`):** If the current ledger timestamp exactly matches the deadline timestamp, the window has **not yet elapsed**. Any attempt to trigger a timeout transition at the exact boundary panics and reverts (`now <= deadline` blocks).
+- **Rationale:** The exclusive boundary ensures that participants and merchants are guaranteed the full duration of their allotted review or cancellation periods, preventing race conditions or premature execution at the final second of a window.
+
+#### Summary of Boundary Checks
+
+| Function | Compared Deadline / Expiry | Blocking Condition | Eligible When | Caller Permissions |
+|---|---|---|---|---|
+| `auto_reject_stale_refund` | `requested_at + auto_reject_window + extension` | `now <= deadline` | `now > deadline` | Permissionless (Anyone) |
+| `auto_approve_refund` | `requested_at + dispute_window` | `now <= threshold` | `now > threshold` | Permissionless (Anyone) |
+| `auto_cancel_expired_request` | `requested_at + cancel_window` | `now <= threshold` | `now > threshold` | Permissionless (Anyone) |
+| `settle_expired_counter_offer` | `offer.expiry` | `now <= expiry` | `now > expiry` | Permissionless (Anyone) |
+
+---
+
+### Deadline Computation
+
+Deadlines are calculated on-chain at request creation or negotiation initiation using ledger state and configuration parameters:
+
+1. **Initial Expiration Timestamp Calculation (`request_refund`):**
+   - When a customer submits a refund request, the contract records the ledger timestamp:
+     ```rust
+     refund.requested_at = env.ledger().timestamp();
+     ```
+   - **Stale Auto-Reject Deadline:**
+     $$\text{Deadline}_{\text{auto-reject}} = \text{requested\_at} + \text{auto\_reject\_window} + \text{extension}$$
+     - `requested_at`: Unix timestamp (in seconds) when the refund request was created.
+     - `auto_reject_window`: Global duration (in seconds) retrieved from instance storage (`DataKey::AutoRejectWindow`). Configured during initialization (`RefundInitConfig`) or updated by admin via `set_auto_reject_window`.
+     - `extension`: Per-refund extension seconds stored in persistent storage (`DataKey::RefundDeadlineExtension(refund_id)`), defaulting to `0`.
+   - **Dispute Auto-Approval Deadline:**
+     $$\text{Deadline}_{\text{dispute}} = \text{requested\_at} + \text{dispute\_window}$$
+   - **Customer Auto-Cancel Deadline:**
+     $$\text{Deadline}_{\text{cancel}} = \text{requested\_at} + \text{customer\_cancel\_window\_seconds}$$
+   - **Ledger Sequence Deadlines:**
+     - Merchant response deadline: `env.ledger().sequence() + merchant_response_window`
+     - Primary review deadline: `env.ledger().sequence() + primary_review_window`
+     - Auto-approval deadline: `env.ledger().sequence() + auto_deadline_window`
+
+2. **Counter-Offer Expiration Timestamp (`counter_offer_refund`):**
+   - When a merchant submits a counter-offer, the expiration timestamp is calculated as:
+     $$\text{Expiry}_{\text{counter-offer}} = \text{now} + \text{counter\_offer\_expiry\_seconds}$$
+     where `counter_offer_expiry_seconds` defaults to 48 hours (172,800 seconds) unless modified by admin.
+
+---
+
+### Deadline Extension (`extend_refund_deadline`)
+
+The contract provides an administrative mechanism to extend the auto-reject deadline for specific refund requests that require ongoing off-chain review or mediation.
+
+#### Caller Permissions and Constraints
+- **Admin Only:** Only the designated contract admin address can execute this function (`require_admin`).
+- **Contract State:** Contract execution must not be paused (`require_not_paused`).
+- **Refund Status:** The target refund must exist and currently be in `RefundStatus::Requested`. If the refund is in any other state (e.g., `Approved`, `Rejected`, `CounterOffered`, `Cancelled`), the call panics with `"Refund is not in requested status"`.
+
+#### Parameters
+- `admin: Address` — The contract administrator address authorizing the extension.
+- `refund_id: u32` — The unique ID of the pending refund request.
+- `extra_seconds: u64` — The additional duration (in seconds) to add to the existing extension.
+
+#### Storage and Behavior Mechanics
+- **Additive Extensions:** Extensions are cumulative. The function reads any prior extension from persistent storage (`DataKey::RefundDeadlineExtension(refund_id)`), adds `extra_seconds`, and persists the updated sum:
+  ```rust
+  let key = DataKey::RefundDeadlineExtension(refund_id);
+  let current_extension: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+  env.storage().persistent().set(&key, &(current_extension + extra_seconds));
+  ```
+- **TTL Bumping:** Automatically bumps persistent storage TTL for the extension record and refreshes contract instance TTL.
+- **Impact on Auto-Reject:** Deferrals directly increase the threshold tested in `auto_reject_stale_refund`, allowing multiple successive extensions if complex reviews require additional time.
+
+---
+
+### Auto-Rejection of Stale Refunds (`auto_reject_stale_refund`)
+
+When a refund request remains in `Requested` status without merchant resolution beyond the configured auto-reject window (and any administrative extensions), it becomes eligible for permissionless auto-rejection.
+
+#### Trigger Conditions and Boundary Verification
+- **Permission:** Anyone can call `auto_reject_stale_refund(refund_id)` once the boundary is crossed (permissionless crank).
+- **Prerequisites:**
+  - Contract is not paused.
+  - Refund exists and is in `RefundStatus::Requested` (panics with `"Refund is not in requested status"` otherwise).
+  - Auto-reject window is configured in contract storage.
+- **Boundary Check:**
+  $$\text{now} > \text{refund.requested\_at} + \text{auto\_reject\_window} + \text{extension}$$
+  If `now <= deadline`, the transaction panics with `"Auto-reject window has not elapsed"`.
+
+#### Execution Lifecycle and Side Effects
+When executed successfully, `auto_reject_stale_refund` performs the following atomic operations:
+1. **Escrow Refund Return:** Transfers the escrowed refund token amount held by the contract back to the customer (`token::Client::transfer(&contract, &refund.customer, &refund.amount)`).
+2. **Status Transition:** Updates refund state to `RefundStatus::Rejected` and sets `refund.rejected_at = Some(now)`.
+3. **Queue Eviction:** Removes the refund ID from the pending queue via `remove_from_pending_queue(&env, refund_id)`.
+4. **Fraud & Merchant Metrics:**
+   - Increments the customer fraud score by `+1` with reason symbol `"auto_rejected"`.
+   - Records the rejection in merchant audit statistics via `update_stats_on_reject(&env, &refund.merchant)`.
+5. **Event Emission:** Emits the `RefundAutoRejected` event containing `refund_id` and `elapsed_seconds` (`now - refund.requested_at`).
+6. **Storage Maintenance:** Persists updated refund state and extends TTL for both persistent refund storage and instance storage.
+
 
 ## Escalation
 
