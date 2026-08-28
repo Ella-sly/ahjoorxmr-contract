@@ -17,6 +17,7 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 - [**Cosigner Guarantee in ROSCA**](rosca-cosigner-guarantee.md) — Overview of co-signer nomination, acceptance, and default coverage logic for community savings groups.
 - [**Contribution Delegation in ROSCA**](rosca-contribution-delegation.md) — Overview of contribution and voting weight delegation, proxy execution, limits, and revocation.
 - [**Co-Payer Contribution Splitting in ROSCA**](rosca-co-payer-splitting.md) — How co-payers are registered for a member's slot, how the split ratio is set and enforced, and what happens if a co-payer fails to contribute.
+- [**ROSCA Waitlist Flow**](rosca-waitlist.md) — Lifecycle of group waitlists, queueing rules, FIFO and reputation-weighted promotion, catch-up contributions, and cancellation.
 
 ---
 
