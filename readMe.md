@@ -337,6 +337,6 @@ For a comprehensive table of contents and topic breakdown, see the **[Documentat
 - [DAO Mediation](docs/dao-mediation.md) — On-chain DAO mediation and voting process for disputed merchant payments.
 - [Multi-Token Invoices](docs/multi-token-invoice.md) — Invoicing with multi-token support, oracle price feeds, and settlement.
 - [ROSCA Co-signer Guarantee](docs/rosca-cosigner-guarantee.md) — Co-signer nomination and default coverage mechanisms for ROSCA groups.
-- [Refund Contract Guide](docs/refund.md) — Refund request/approval flows, senior escalation, and abuse score tracking.
+- [Refund Contract Guide](docs/refund.md) — Refund request/approval flows, deadline boundary enforcement, senior escalation, and abuse score tracking.
 - [ROSCA Migration Guide](docs/migration-guide.md) — Upgrade and migration process for deployed ROSCA contracts.
 - [Weighted Voting in ROSCA Governance](docs/rosca-weighted-voting.md) — Member vote weight derivation from round contributions, proposal voting, and dynamic quorum tallying.
