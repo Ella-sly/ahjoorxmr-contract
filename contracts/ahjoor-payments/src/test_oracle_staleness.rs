@@ -1,8 +1,6 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::token::Client as TokenClient;
-use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, Symbol};
+use soroban_sdk::{testutils::Address as _, Address, Env};
 
 mod mock_oracle_initial {
     use soroban_sdk::{contract, contractimpl, Address, Env};
@@ -54,7 +52,7 @@ fn setup_dynamic<'a>() -> (Env, AhjoorPaymentsContractClient<'a>, Address, Addre
 
 #[test]
 fn test_settlement_rejects_stale_oracle_price() {
-    let (env, client, admin, merchant, usdc_addr, token_addr, oracle_initial, oracle_stale) = setup_dynamic();
+    let (env, client, _admin, merchant, usdc_addr, token_addr, _oracle_initial, oracle_stale) = setup_dynamic();
     
     let customer = Address::generate(&env);
     let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);

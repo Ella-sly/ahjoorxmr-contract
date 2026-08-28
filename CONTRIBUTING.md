@@ -21,7 +21,7 @@ Thank you for your interest in contributing! This guide covers everything you ne
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (stable toolchain)
+- [Rust](https://rustup.rs/) or [Virenv](https://github.com/caxtonacollins/virenv) (stable toolchain)
 - `wasm32-unknown-unknown` target:
     ```bash
     rustup target add wasm32-unknown-unknown

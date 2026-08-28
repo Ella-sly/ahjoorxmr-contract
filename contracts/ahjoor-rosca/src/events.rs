@@ -282,6 +282,47 @@ pub struct ExitRequested {
     pub round: u32,
 }
 
+/// Event: Voluntary exit requested with deferred effective ledger (#792)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VoluntaryExitRequested {
+    pub member: Address,
+    pub effective_ledger: u32,
+}
+
+/// Event: Voluntary exit request cancelled by member (#792)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VoluntaryExitCancelled {
+    pub member: Address,
+}
+
+/// Event: Member prepaid multiple future contribution rounds (#790)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RoundsPrepaid {
+    pub member: Address,
+    pub num_rounds: u32,
+    pub total_amount: i128,
+}
+
+/// Event: Prepaid balance consumed for a round (#790)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PrepaidConsumed {
+    pub member: Address,
+    pub round: u32,
+    pub amount: i128,
+}
+
+/// Event: Unused prepaid balance withdrawn (#790)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PrepaidWithdrawn {
+    pub member: Address,
+    pub amount: i128,
+}
+
 /// Event: Emergency exit approved
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -1989,4 +2030,38 @@ pub fn emit_contribution_receipt_minted(
         receipt_hash,
     }
     .publish(e);
+}
+
+pub fn emit_voluntary_exit_requested(e: &Env, member: Address, effective_ledger: u32) {
+    VoluntaryExitRequested {
+        member,
+        effective_ledger,
+    }
+    .publish(e);
+}
+
+pub fn emit_voluntary_exit_cancelled(e: &Env, member: Address) {
+    VoluntaryExitCancelled { member }.publish(e);
+}
+
+pub fn emit_rounds_prepaid(e: &Env, member: Address, num_rounds: u32, total_amount: i128) {
+    RoundsPrepaid {
+        member,
+        num_rounds,
+        total_amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_prepaid_consumed(e: &Env, member: Address, round: u32, amount: i128) {
+    PrepaidConsumed {
+        member,
+        round,
+        amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_prepaid_withdrawn(e: &Env, member: Address, amount: i128) {
+    PrepaidWithdrawn { member, amount }.publish(e);
 }

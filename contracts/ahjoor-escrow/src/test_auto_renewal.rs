@@ -4,7 +4,7 @@ use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, Env, Vec,
+    Address, Env, String, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -524,8 +524,14 @@ fn test_refund_does_not_trigger_renewal() {
 
     approve_allowance(&s, &buyer, 200 * 3);
 
-    // Refund the escrow instead of releasing
-    s.client.refund_escrow(&seller, &escrow_id);
+    // Refund the escrow instead of releasing (full dispute resolved to buyer)
+    s.client.dispute_escrow(
+        &buyer,
+        &escrow_id,
+        &String::from_str(&s.env, "Refund requested"),
+        &200,
+    );
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
 
     let original = s.client.get_escrow(&escrow_id);
     assert_eq!(original.status, EscrowStatus::Refunded);
@@ -566,10 +572,15 @@ fn test_dispute_resolved_to_buyer_no_renewal() {
     approve_allowance(&s, &buyer, 200 * 3);
 
     // Dispute the escrow
-    s.client.dispute_escrow(&buyer, &escrow_id);
+    s.client.dispute_escrow(
+        &buyer,
+        &escrow_id,
+        &String::from_str(&s.env, "Item not received"),
+        &200,
+    );
 
     // Resolve to buyer (refund scenario)
-    s.client.resolve_dispute(&arbiter, &escrow_id, &true);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
 
     let original = s.client.get_escrow(&escrow_id);
     assert_eq!(original.status, EscrowStatus::Refunded);
@@ -606,10 +617,15 @@ fn test_dispute_resolved_to_seller_no_renewal() {
     approve_allowance(&s, &buyer, 200 * 3);
 
     // Dispute the escrow
-    s.client.dispute_escrow(&buyer, &escrow_id);
+    s.client.dispute_escrow(
+        &buyer,
+        &escrow_id,
+        &String::from_str(&s.env, "Item not received"),
+        &200,
+    );
 
     // Resolve to seller
-    s.client.resolve_dispute(&arbiter, &escrow_id, &false);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
 
     let original = s.client.get_escrow(&escrow_id);
     assert_eq!(original.status, EscrowStatus::Released);

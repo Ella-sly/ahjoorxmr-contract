@@ -173,6 +173,13 @@ pub struct PaymentCaptured {
     pub amount: i128,
 }
 
+/// Event: Customer cancelled an authorized payment before capture (#803)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentCancelledByCustomer {
+    pub payment_id: u32,
+}
+
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct CustomerBlocked {
@@ -566,6 +573,10 @@ pub fn emit_payment_expiry_override(e: &Env, payment_id: u32, expiry_seconds: u6
 
 pub fn emit_payment_captured(e: &Env, payment_id: u32, amount: i128) {
     PaymentCaptured { payment_id, amount }.publish(e);
+}
+
+pub fn emit_payment_cancelled_by_customer(e: &Env, payment_id: u32) {
+    PaymentCancelledByCustomer { payment_id }.publish(e);
 }
 
 pub fn emit_payment_partial_refund(
@@ -2085,4 +2096,39 @@ pub fn emit_dao_verdict_executed(
 
 pub fn emit_dao_escalation_cancelled(e: &Env, payment_id: u32, case_id: u32) {
     DaoEscalationCancelled { payment_id, case_id }.publish(e);
+}
+
+// ── #805: Recurring Micro-Tip Subscriptions ───────────────────────────────────
+
+pub fn emit_tip_subscription_created(
+    e: &Env,
+    subscription_id: u32,
+    customer: Address,
+    recipient: Address,
+    amount: i128,
+) {
+    e.events().publish(
+        (Symbol::new(e, "TipSubCreated"),),
+        (subscription_id, customer, recipient, amount),
+    );
+}
+
+pub fn emit_tip_executed(
+    e: &Env,
+    subscription_id: u32,
+    execution: u32,
+    amount: i128,
+    next_due_ledger: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "TipExecuted"),),
+        (subscription_id, execution, amount, next_due_ledger),
+    );
+}
+
+pub fn emit_tip_subscription_cancelled(e: &Env, subscription_id: u32, customer: Address) {
+    e.events().publish(
+        (Symbol::new(e, "TipSubCancelled"),),
+        (subscription_id, customer),
+    );
 }

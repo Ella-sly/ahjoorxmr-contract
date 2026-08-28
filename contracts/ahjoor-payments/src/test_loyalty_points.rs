@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 #![cfg(test)]
 use super::*;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
@@ -20,7 +21,8 @@ fn setup_loyalty<'a>() -> (Env, AhjoorPaymentsContractClient<'a>, Address, Addre
     client.approve_merchant(&merchant);
 
     // Configure loyalty: 1 point per 1_000_000 units, 100 bps per point, floor 10
-    client.configure_loyalty(&admin, &1u32, &100u32, &10i128, &0u32);
+   // Configure loyalty: 1 point per 1_000_000 units, 100 bps per point, floor 10
+     client.configure_loyalty(&admin, &1u32, &100u32, &10i128, &0u32);
 
     // Mint tokens to a customer
     let customer = Address::generate(&env);
@@ -30,6 +32,7 @@ fn setup_loyalty<'a>() -> (Env, AhjoorPaymentsContractClient<'a>, Address, Addre
 }
 
 fn token_addr_from_setup(env: &Env, admin: &Address) -> Address {
+    // Re-derive token address — in tests we need to pass it around
     // Re-derive token address — in tests we need to pass it around
     // We'll just use a helper that creates a payment and returns the token
     let _ = env;
@@ -64,7 +67,7 @@ fn setup_loyalty_with_token<'a>() -> (Env, AhjoorPaymentsContractClient<'a>, Add
 
 #[test]
 fn test_points_accrued_after_payment() {
-    let (env, client, _admin, merchant, customer, token_addr) = setup_loyalty_with_token();
+    let (_env, client, _admin, merchant, customer, token_addr) = setup_loyalty_with_token();
 
     // payment_amount = 1_000_000 → points_earned = 1_000_000 * 1 / 1_000_000 = 1
     let payment_id = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
@@ -75,7 +78,7 @@ fn test_points_accrued_after_payment() {
 
 #[test]
 fn test_full_redemption() {
-    let (env, client, _admin, merchant, customer, token_addr) = setup_loyalty_with_token();
+    let (_env, client, _admin, merchant, customer, token_addr) = setup_loyalty_with_token();
 
     // Accrue 10 points via a 10_000_000 payment
     let payment_id = client.create_payment(&customer, &merchant, &10_000_000, &token_addr, &None, &None, &None);
@@ -83,13 +86,14 @@ fn test_full_redemption() {
     assert_eq!(client.get_loyalty_points_balance(&customer), 10);
 
     // Create a new payment and redeem all 10 points
+    // Create a new payment and redeem all 10 points
     // discount = 10 * 100 / 10_000 = 0.1 per unit → 10 * 100 bps = 1000 bps of... wait
     // discount = points * redemption_rate_bps / 10_000 = 10 * 100 / 10_000 = 0 (integer)
     // Use larger payment to get meaningful discount
     // redemption_rate_bps=100 means 100 bps per point = 1% per point
     // discount = 10 points * 100 / 10_000 = 0 — need bigger rate
     // Let's reconfigure with rate 10_000 (100% per point) for test clarity
-    let (env2, client2, admin2, merchant2, customer2, token_addr2) = setup_loyalty_with_token();
+    let (_env2, client2, admin2, merchant2, customer2, token_addr2) = setup_loyalty_with_token();
     // Reconfigure: 1 point per 1_000_000, 10_000 bps per point (= 1 unit per point), floor 0
     client2.configure_loyalty(&admin2, &1u32, &10_000u32, &0i128, &0u32);
 
@@ -106,7 +110,7 @@ fn test_full_redemption() {
 
 #[test]
 fn test_partial_redemption() {
-    let (env, client, admin, merchant, customer, token_addr) = setup_loyalty_with_token();
+    let (_env, client, admin, merchant, customer, token_addr) = setup_loyalty_with_token();
     client.configure_loyalty(&admin, &10u32, &10_000u32, &0i128, &0u32);
 
     // Accrue 10 points
@@ -136,7 +140,7 @@ fn test_floor_enforcement() {
     client.redeem_points(&customer, &pid2, &balance);
 
     // Payment amount should not go below floor
-    let payment: Payment = env.as_contract(&env.register(AhjoorPaymentsContract, ()), || {
+    let _payment: Payment = env.as_contract(&env.register(AhjoorPaymentsContract, ()), || {
         // Can't easily read storage in test; just verify no panic occurred
         Payment {
             id: pid2,
@@ -198,6 +202,7 @@ fn test_non_transferability() {
 }
 
 #[test]
+// Full refund via dispute_resolve: dispute a new pending payment for the same amount
 fn test_points_reversed_on_refund() {
     // 1 point per 1_000_000 units
     let (env, client, admin, merchant, customer, token_addr) = setup_loyalty_with_token();
@@ -250,7 +255,7 @@ fn test_balance_zero_for_customer_with_no_activity() {
 
 #[test]
 fn test_balance_reflects_earn_then_redeem_sequence() {
-    let (env, client, admin, merchant, customer, token_addr) = setup_loyalty_with_token();
+    let (_env, client, admin, merchant, customer, token_addr) = setup_loyalty_with_token();
     // 1 point per 1_000_000 units, 10_000 bps (1 unit) per point, no floor
     client.configure_loyalty(&admin, &1u32, &10_000u32, &0i128, &0u32);
 

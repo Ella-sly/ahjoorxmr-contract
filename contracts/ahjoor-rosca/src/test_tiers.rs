@@ -8,6 +8,7 @@ use soroban_sdk::{
 };
 
 /// Helper to create a test setup with members
+// Helper function to create the test
 fn setup_with_members<'a>(n: usize, mint_amount: i128) -> (Env, AhjoorContractClient<'a>, Address, Address, TokenClient<'a>, TokenAdminClient<'a>, soroban_sdk::Vec<Address>) {
     let env = Env::default();
     env.mock_all_auths();
@@ -146,6 +147,7 @@ fn test_invalid_tier_rejected() {
     let member = members.get(0).unwrap();
     
     // Tier 0 is invalid
+    // Tier zero is invalid
     let result = client.try_set_member_tier(&admin, &member, &0);
     assert_eq!(result.unwrap_err().unwrap(), ExtError::InvalidTier.into());
 }
@@ -197,6 +199,7 @@ fn test_mixed_tiers_pot_size() {
     // Member1: 1x (default) -> 100
     // Member2: 1.5x (15000 bps) -> 150
     // Member3: 3x (30000 bps) -> 300
+    // Member4: 4x (40000 bps) -> 400
     client.set_member_tier(&admin, &member2, &15000);
     client.set_member_tier(&admin, &member3, &30000);
 

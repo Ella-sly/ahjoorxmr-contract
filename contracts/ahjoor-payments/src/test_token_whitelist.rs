@@ -4,7 +4,7 @@ use crate::{AhjoorPaymentsContract, AhjoorPaymentsContractClient, Error};
 use ahjoor_token_whitelist::{TokenWhitelistContract, TokenWhitelistContractClient};
 use soroban_sdk::{
     testutils::{Address as _},
-    token, Address, Env, String,
+    token, Address, Env,
 };
 
 fn create_token_contract<'a>(e: &Env, admin: &Address) -> (Address, token::StellarAssetClient<'a>) {
@@ -66,7 +66,7 @@ fn setup_test_env() -> (
 fn test_set_token_whitelist_contract() {
     let (
         _env,
-        admin,
+        _admin,
         _customer,
         _merchant,
         _token,
@@ -86,7 +86,7 @@ fn test_set_token_whitelist_contract_unauthorized() {
     let (
         env,
         _admin,
-        customer,
+        _customer,
         _merchant,
         _token,
         whitelist_contract_id,

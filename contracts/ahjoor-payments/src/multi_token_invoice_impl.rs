@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, Bytes,
+    panic_with_error, token, Address,
     BytesN, Env, Map, String, Symbol, Vec,
 };
 use crate::multi_token_invoice::*;
@@ -326,8 +326,8 @@ impl MultiTokenInvoiceImpl {
     }
 
     /// Get invoice payment history
-    pub fn get_invoice_payments(env: &Env, invoice_id: u32) -> Vec<InvoicePayment> {
-        let mut payments = Vec::new(env);
+    pub fn get_invoice_payments(env: &Env, _invoice_id: u32) -> Vec<InvoicePayment> {
+        let payments = Vec::new(env);
 
         // This would require iterating through all payments and filtering by invoice_id
         // For now, return empty vector - in production, use a proper indexing strategy

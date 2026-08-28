@@ -267,7 +267,7 @@ fn test_retry_success_advances_cycle_counter() {
 #[test]
 fn test_trigger_invoice_cycle_succeeds_at_due_ledger() {
     let env = Env::default();
-    let (client, _admin, merchant, customer, token, _ta, invoice_id) = setup_recurring_invoice(&env);
+    let (client, _admin, _merchant, _customer, _token, _ta, invoice_id) = setup_recurring_invoice(&env);
 
     // Get invoice to see current next_due_ledger
     let invoice: RecurringInvoice = client.get_recurring_invoice(&invoice_id);
@@ -293,7 +293,7 @@ fn test_trigger_invoice_cycle_succeeds_at_due_ledger() {
 #[test]
 fn test_trigger_invoice_cycle_fails_before_due_ledger() {
     let env = Env::default();
-    let (client, _admin, merchant, customer, token, _ta, invoice_id) = setup_recurring_invoice(&env);
+    let (client, _admin, _merchant, _customer, _token, _ta, invoice_id) = setup_recurring_invoice(&env);
 
     // Manually set invoice's next_due_ledger to a future ledger
     // by directly updating storage (simulating a future due date)

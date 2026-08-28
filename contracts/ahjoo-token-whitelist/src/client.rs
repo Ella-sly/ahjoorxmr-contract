@@ -10,10 +10,10 @@ pub trait TokenWhitelistInterface {
     /// Check if a token is allowed
     fn is_token_allowed(env: Env, token: Address) -> bool;
     
-    /// Add a token to the whitelist (admin only)
+    // Add a token to the whitelist (admin only)
     fn add_token(env: Env, admin: Address, token: Address);
     
-    /// Remove a token from the whitelist (admin only)
+    // Remove a token from the whitelist (admin only)
     fn remove_token(env: Env, admin: Address, token: Address);
     
     /// Get all whitelisted tokens

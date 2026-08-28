@@ -228,6 +228,14 @@ pub enum ExtError {
     InvalidAmount = 71,
     /// Merchant has KYB on record, but it is now expired.
     MerchantKYBExpired = 72,
+    /// Merchant has reached the configured max invoice count for the current period (#804).
+    MerchantInvoiceCapExceeded = 73,
+    /// Caller is not the payment's customer (#803).
+    NotPaymentCustomer = 74,
+    /// Payment is not in Authorized status for customer cancellation (#803).
+    NotAuthorizedForCancel = 75,
+    /// Capture deadline has passed; customer can no longer cancel (#803).
+    CancelPastCaptureDeadline = 76,
 }
 
 /// Per-merchant withdrawal rate limit config (#231).
@@ -387,6 +395,8 @@ pub enum PaymentStatus {
     CancelledInCoolingOff = 9,
     /// Dispute has exceeded the escalation timeout and is awaiting priority resolution (#417)
     EscalatedDispute = 10,
+    /// Customer cancelled an authorized payment before merchant capture (#803)
+    CustomerCancelled = 11,
 }
 
 #[contracttype]
@@ -735,12 +745,45 @@ pub struct RecurringPaymentSchedule {
     pub active: bool,
 }
 
+/// #805: Lightweight recurring micro-tip subscription (independent of invoices).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TipSubscription {
+    pub id: u32,
+    pub customer: Address,
+    pub recipient: Address,
+    pub token: Address,
+    pub amount: i128,
+    /// Minimum ledgers between tip executions.
+    pub interval_ledgers: u32,
+    /// Absolute ledger sequence at or after which the next tip may execute.
+    pub next_due_ledger: u32,
+    pub active: bool,
+    pub executions: u32,
+}
+
 /// Per-merchant volume cap configuration (#131)
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VolumeCap {
     pub cap_amount: i128,
     pub window_seconds: u64,
+}
+
+/// Per-merchant max invoice count configuration (#804).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceCountCap {
+    pub period_ledgers: u32,
+    pub max_count: u32,
+}
+
+/// Rolling invoice-count window state for a merchant (#804).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceCountWindow {
+    pub count: u32,
+    pub window_start: u32,
 }
 
 #[contracttype]
@@ -1065,6 +1108,10 @@ pub enum DataKey3 {
     SubscriptionPlan(u32),
     /// Instance: when true, merchant KYB checks are enforced on payment creation.
     KYBRequired,
+    /// #805: counter for tip subscriptions
+    TipSubscriptionCounter,
+    /// #805: tip subscription record
+    TipSubscription(u32),
 }
 
 mod events;
@@ -1397,6 +1444,7 @@ impl AhjoorPaymentsContract {
         }
 
         Self::enforce_rate_limit(&env, &customer, 1);
+        Self::enforce_merchant_invoice_cap(&env, &merchant);
 
         if amount <= 0 {
             panic!("Payment amount must be positive");
@@ -2859,12 +2907,26 @@ impl AhjoorPaymentsContract {
             .expect("Oracle not configured")
     }
 
+    /// Return the oracle-locked pricing snapshot for a dynamic payment, if one exists.
+    pub fn get_dynamic_payment(env: Env, payment_id: u32) -> Option<DynamicPayment> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::DynamicPayment(payment_id))
+    }
+
     // --- Admin ---
 
     pub fn set_merchant_slippage_tolerance(env: Env, merchant: Address, bps: u32) {
         Self::require_not_paused(&env);
         merchant.require_auth();
         env.storage().persistent().set(&DataKey3::SlippageToleranceBps(merchant), &bps);
+    }
+
+    /// Return a merchant's configured slippage tolerance in basis points, if set.
+    pub fn get_merchant_slippage_tolerance(env: Env, merchant: Address) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::SlippageToleranceBps(merchant))
     }
 
     pub fn set_max_batch_size(env: Env, new_size: u32) {
@@ -3205,7 +3267,7 @@ impl AhjoorPaymentsContract {
         // Wait let's check the rest of the codebase to confirm!
         // Wait let's check the existing code for expires_at usage! For example, how is a payment considered expired?
         // Let's look for expire_payment or similar!
-        let now = env.ledger().timestamp();
+        let _now = env.ledger().timestamp();
         // Assuming 1 ledger is 5 seconds (common in Stellar Soroban), but wait - actually, maybe the user intended additional_ledgers to mean additional seconds? Wait, let's check the issue description again! Wait the issue says:
         // "merchant calls extend_payment_expiry(payment_id, additional_ledgers: u32) on a Pending payment before it expires, the contract advances expiry_ledger by additional_ledgers."
         // But wait in our current code, we don't have expiry_ledger - we have expires_at which is a timestamp in seconds! Oh! Wait let's check the existing codebase to see if there's an expiry_ledger field anywhere!
@@ -3302,6 +3364,60 @@ impl AhjoorPaymentsContract {
         env.storage()
             .persistent()
             .get(&DataKey::VolumeCap(merchant))
+    }
+
+    /// Admin sets a rolling max invoice count for a merchant within `period_ledgers` (#804).
+    /// Set `max_count = 0` to remove the cap (merchant unrestricted).
+    pub fn set_max_invoices_per_period(
+        env: Env,
+        admin: Address,
+        merchant: Address,
+        period_ledgers: u32,
+        max_count: u32,
+    ) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        if max_count > 0 && period_ledgers == 0 {
+            panic!("period_ledgers must be positive when cap is set");
+        }
+
+        let cap_key = DataKey3::InvoiceCountCap(merchant.clone());
+        let window_key = DataKey3::InvoiceCountWindow(merchant.clone());
+
+        if max_count == 0 {
+            env.storage().persistent().remove(&cap_key);
+            env.storage().persistent().remove(&window_key);
+        } else {
+            env.storage().persistent().set(
+                &cap_key,
+                &InvoiceCountCap {
+                    period_ledgers,
+                    max_count,
+                },
+            );
+            env.storage().persistent().extend_ttl(
+                &cap_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the current invoice-count window for a merchant (#804).
+    /// Merchants without a configured cap return a zeroed window.
+    pub fn get_invoice_count_window(env: Env, merchant: Address) -> InvoiceCountWindow {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::InvoiceCountWindow(merchant))
+            .unwrap_or(InvoiceCountWindow {
+                count: 0,
+                window_start: 0,
+            })
     }
 
     /// Propose a new admin address. Only the current admin can propose.
@@ -4185,6 +4301,17 @@ impl AhjoorPaymentsContract {
             .unwrap_or(DEFAULT_MAX_BATCH_SIZE)
     }
 
+    /// Get the cumulative refunded amount for a payment.
+    /// Returns the total amount that has been refunded for the given payment ID.
+    pub fn get_payment_refunded_amount(env: Env, payment_id: u32) -> i128 {
+        let payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+        payment.refunded_amount
+    }
+
     pub fn is_disputed(env: Env, payment_id: u32) -> bool {
         let payment: Payment = env
             .storage()
@@ -4919,6 +5046,17 @@ impl AhjoorPaymentsContract {
         None
     }
 
+    /// Return the full notification key rotation history for a merchant.
+    pub fn get_notification_key_history(
+        env: Env,
+        merchant: Address,
+    ) -> soroban_sdk::Vec<NotificationKeyEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::NotificationKeyHistory(merchant))
+            .unwrap_or(soroban_sdk::Vec::new(&env))
+    }
+
     /// Set the notification key rotation overlap window (admin only).
     pub fn set_notification_overlap_window(
         env: Env,
@@ -5375,7 +5513,7 @@ impl AhjoorPaymentsContract {
     }
 
     /// #327: Pause subscription with authority enforcement and pause count tracking.
-    pub fn pause_subscription_v2(env: Env, caller: Address, sub_id: u32, reason_hash: BytesN<32>) {
+    pub fn pause_subscription_v2(env: Env, caller: Address, sub_id: u32, _reason_hash: BytesN<32>) {
         Self::require_not_paused(&env);
         caller.require_auth();
 
@@ -6477,6 +6615,66 @@ impl AhjoorPaymentsContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Customer self-service cancellation of an authorized payment before merchant capture (#803).
+    /// Transitions to `CustomerCancelled` and refunds escrow. Rejected once captured, expired,
+    /// past `capture_deadline`, or called by a non-owning address.
+    pub fn cancel_payment(env: Env, customer: Address, payment_id: u32) {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        let mut payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+
+        if payment.customer != customer {
+            panic_with_error!(&env, ExtError::NotPaymentCustomer);
+        }
+        if payment.status != PaymentStatus::Authorized {
+            panic_with_error!(&env, ExtError::NotAuthorizedForCancel);
+        }
+        if payment.capture_deadline == 0
+            || (env.ledger().sequence() as u64) >= payment.capture_deadline
+        {
+            panic_with_error!(&env, ExtError::CancelPastCaptureDeadline);
+        }
+
+        let refund_amount = payment.amount - payment.refunded_amount;
+        if refund_amount > 0 {
+            let client = token::Client::new(&env, &payment.token);
+            client.transfer(
+                &env.current_contract_address(),
+                &payment.customer,
+                &refund_amount,
+            );
+            payment.refunded_amount = payment.amount;
+        }
+
+        let old_status = payment.status;
+        payment.status = PaymentStatus::CustomerCancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Payment(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_payment_cancelled_by_customer(&env, payment_id);
+        events::emit_payment_status_changed(
+            &env,
+            payment_id,
+            old_status,
+            PaymentStatus::CustomerCancelled,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     /// Execute a token swap via the configured DEX router.
     /// Returns the output amount or an error symbol.
     /// Internal: if a DynamicPayment record exists for this payment, validate expiry.
@@ -6532,13 +6730,13 @@ impl AhjoorPaymentsContract {
 
     fn execute_token_swap(
         env: &Env,
-        payment_id: u32,
-        customer: &Address,
-        input_token: &Address,
-        output_token: &Address,
+        _payment_id: u32,
+        _customer: &Address,
+        _input_token: &Address,
+        _output_token: &Address,
         input_amount: i128,
     ) -> Result<i128, Symbol> {
-        let router: Address = env
+        let _router: Address = env
             .storage()
             .instance()
             .get(&DataKey::SwapRouter)
@@ -6546,7 +6744,7 @@ impl AhjoorPaymentsContract {
 
         // Get slippage config
         let slippage_cfg = Self::get_slippage_config_internal(env);
-        let max_slippage_bps = slippage_cfg.max_bps;
+        let _max_slippage_bps = slippage_cfg.max_bps;
 
         // For now, we simulate a swap by checking if the router is set
         // In a real implementation, this would call the DEX router contract
@@ -6636,7 +6834,7 @@ impl AhjoorPaymentsContract {
                 // Swap is needed
                 let router: Option<Address> = env.storage().instance().get(&DataKey::SwapRouter);
 
-                if let Some(router_addr) = router {
+                if let Some(_router_addr) = router {
                     // Attempt swap
                     let swap_result = Self::execute_token_swap(
                         env,
@@ -7091,6 +7289,44 @@ impl AhjoorPaymentsContract {
         env.storage().persistent().set(&key, &state);
         env.storage().persistent().extend_ttl(
             &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Enforce rolling per-merchant invoice count cap (#804). No-op when unset.
+    fn enforce_merchant_invoice_cap(env: &Env, merchant: &Address) {
+        let cap_key = DataKey3::InvoiceCountCap(merchant.clone());
+        let cap: InvoiceCountCap = match env.storage().persistent().get(&cap_key) {
+            Some(c) => c,
+            None => return,
+        };
+
+        let current_ledger = env.ledger().sequence();
+        let window_key = DataKey3::InvoiceCountWindow(merchant.clone());
+        let mut window: InvoiceCountWindow =
+            env.storage()
+                .persistent()
+                .get(&window_key)
+                .unwrap_or(InvoiceCountWindow {
+                    count: 0,
+                    window_start: current_ledger,
+                });
+
+        if current_ledger.saturating_sub(window.window_start) >= cap.period_ledgers {
+            window.count = 0;
+            window.window_start = current_ledger;
+        }
+
+        let new_count = window.count.saturating_add(1);
+        if new_count > cap.max_count {
+            panic_with_error!(env, ExtError::MerchantInvoiceCapExceeded);
+        }
+
+        window.count = new_count;
+        env.storage().persistent().set(&window_key, &window);
+        env.storage().persistent().extend_ttl(
+            &window_key,
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
@@ -7936,6 +8172,13 @@ impl AhjoorPaymentsContract {
             .persistent()
             .get(&DataKey2::MerchantStatus(merchant))
             .unwrap_or(MerchantStatus::Active)
+    }
+
+    /// Get the timestamp at which a merchant's suspension expires, if any.
+    pub fn get_merchant_suspension_expiry(env: Env, merchant: Address) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::MerchantSuspensionExpiry(merchant))
     }
 
     /// Get the active appeal for a merchant, if any.
@@ -10576,6 +10819,13 @@ impl AhjoorPaymentsContract {
             .expect("Mediation case not found")
     }
 
+    /// Return how (or whether) a specific DAO member voted on a mediation case.
+    pub fn get_dao_vote(env: Env, case_id: u32, voter: Address) -> Option<bool> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::DaoMediationVote(case_id, voter))
+    }
+
     /// Return the DAO mediation case for `payment_id`, if one exists.
     pub fn get_dao_case_by_payment(env: Env, payment_id: u32) -> Option<DaoMediationCase> {
         let case_id: u32 = env.storage().persistent().get(&DataKey3::DaoCaseByPayment(payment_id))?;
@@ -10605,6 +10855,163 @@ impl AhjoorPaymentsContract {
             .get(&DataKey3::DaoMembers)
             .unwrap_or(Vec::new(&env))
     }
+
+    // ── #805: Recurring Micro-Tip Subscriptions ───────────────────────────────
+
+    /// Create a lightweight tip subscription independent of invoice/payment flows.
+    /// Customer must approve token allowance for relayer-executed tips via `transfer_from`.
+    pub fn create_tip_subscription(
+        env: Env,
+        customer: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        interval_ledgers: u32,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        if amount <= 0 {
+            panic!("Tip amount must be positive");
+        }
+        if interval_ledgers == 0 {
+            panic!("Tip interval must be positive");
+        }
+
+        Self::require_token_allowed(&env, &token);
+
+        let mut counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::TipSubscriptionCounter)
+            .unwrap_or(0);
+        let sub_id = counter;
+        counter += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey3::TipSubscriptionCounter, &counter);
+
+        let now_ledger = env.ledger().sequence();
+        let sub = TipSubscription {
+            id: sub_id,
+            customer: customer.clone(),
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount,
+            interval_ledgers,
+            next_due_ledger: now_ledger,
+            active: true,
+            executions: 0,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::TipSubscription(sub_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::TipSubscription(sub_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_tip_subscription_created(&env, sub_id, customer, recipient, amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        sub_id
+    }
+
+    /// Execute a due tip. Callable by anyone once `ledger.sequence >= next_due_ledger`.
+    /// Transfers `amount` from customer to recipient via token allowance.
+    pub fn execute_due_tip(env: Env, subscription_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut sub: TipSubscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::TipSubscription(subscription_id))
+            .expect("Tip subscription not found");
+
+        if !sub.active {
+            panic!("Tip subscription is not active");
+        }
+
+        let now_ledger = env.ledger().sequence();
+        if now_ledger < sub.next_due_ledger {
+            panic!("Tip interval has not elapsed");
+        }
+
+        let client = token::Client::new(&env, &sub.token);
+        client.transfer_from(
+            &env.current_contract_address(),
+            &sub.customer,
+            &sub.recipient,
+            &sub.amount,
+        );
+
+        sub.executions += 1;
+        sub.next_due_ledger = now_ledger + sub.interval_ledgers;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::TipSubscription(subscription_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::TipSubscription(subscription_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_tip_executed(
+            &env,
+            subscription_id,
+            sub.executions,
+            sub.amount,
+            sub.next_due_ledger,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Cancel a tip subscription. Only the customer may cancel.
+    pub fn cancel_tip_subscription(env: Env, customer: Address, subscription_id: u32) {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        let mut sub: TipSubscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::TipSubscription(subscription_id))
+            .expect("Tip subscription not found");
+
+        if customer != sub.customer {
+            panic!("Only the tip customer can cancel");
+        }
+        if !sub.active {
+            panic!("Tip subscription is already cancelled");
+        }
+
+        sub.active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey3::TipSubscription(subscription_id), &sub);
+
+        events::emit_tip_subscription_cancelled(&env, subscription_id, customer);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Read a tip subscription record.
+    pub fn get_tip_subscription(env: Env, subscription_id: u32) -> TipSubscription {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::TipSubscription(subscription_id))
+            .expect("Tip subscription not found")
+    }
 }
 
 #[cfg(test)]
@@ -10612,6 +11019,9 @@ mod test_disputes_by_merchant;
 
 #[cfg(test)]
 mod test_tip;
+
+#[cfg(test)]
+mod test_tip_subscription;
 
 #[cfg(test)]
 mod test_consent;
@@ -10650,6 +11060,12 @@ mod test_oracle_staleness;
 mod test_dao_mediation;
 #[cfg(test)]
 mod test_kyb;
+
+#[cfg(test)]
+mod test_invoice_cap;
+
+#[cfg(test)]
+mod test_customer_cancel;
 
 #[cfg(test)]
 mod test;

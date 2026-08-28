@@ -2859,6 +2859,15 @@ impl AhjoorRefundContract {
             .expect("Payment contract not configured")
     }
 
+    /// Get the maximum batch size for batch refund operations.
+    /// Returns the configured max batch size or the default if not set.
+    pub fn get_max_batch_size(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxBatchSize)
+            .unwrap_or(DEFAULT_MAX_BATCH_SIZE)
+    }
+
     /// Upgrade this contract's WASM code. Admin only.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         admin.require_auth();
@@ -4171,8 +4180,18 @@ impl AhjoorRefundContract {
 
     /// Record payment volume for a merchant (called when a payment is created).
     /// Adds `amount` to the merchant's tracked volume used for reserve compliance.
-    pub fn record_payment_volume(env: Env, merchant: Address, amount: i128) {
+    /// `caller` must authorize and match the configured payment contract address.
+    pub fn record_payment_volume(env: Env, caller: Address, merchant: Address, amount: i128) {
         Self::require_not_paused(&env);
+        caller.require_auth();
+        let payment_contract_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContractAddress)
+            .expect("Payment contract not configured");
+        if caller != payment_contract_addr {
+            panic!("Unauthorized: caller is not the configured payment contract");
+        }
         if amount <= 0 {
             return;
         }
@@ -5611,6 +5630,23 @@ impl AhjoorRefundContract {
             .set(&DataKey2::ReserveAlertThresholdBps, &alert_bps);
     }
 
+    /// Get the current reserve configuration: (reserve_token, min_reserve_bps, alert_threshold_bps).
+    /// Uses the same fallbacks as deposit_merchant_reserve/check_merchant_reserve.
+    pub fn get_reserve_config(env: Env) -> (Option<Address>, u32, u32) {
+        let token: Option<Address> = env.storage().instance().get(&DataKey2::ReserveToken);
+        let min_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::MinReserveBpsOfMonthlyVolume)
+            .unwrap_or(500);
+        let alert_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ReserveAlertThresholdBps)
+            .unwrap_or(10_000);
+        (token, min_bps, alert_bps)
+    }
+
     /// #585: Admin-triggered one-time migration of a merchant's legacy (#274)
     /// reserve balance into the canonical (#334) reserve balance. Moves the
     /// full legacy balance, zeroes the legacy entry, and returns the amount
@@ -5706,7 +5742,6 @@ impl AhjoorRefundContract {
         exempt: bool,
     ) {
         Self::require_not_paused(&env);
-        admin.require_auth();
         Self::require_admin(&env, &admin);
         env.storage()
             .persistent()
@@ -5948,6 +5983,14 @@ impl AhjoorRefundContract {
     /// else the hardcoded fallback — the same resolution used to enforce refunds.
     pub fn export_refund_policy(env: Env, merchant: Address) -> RefundPolicy {
         Self::refund_policy_for(&env, &merchant)
+    }
+
+    /// Returns the `RefundPolicy` snapshot captured at the time a given refund
+    /// was requested, regardless of any later policy updates.
+    pub fn get_refund_policy_snapshot(env: Env, refund_id: u32) -> Option<RefundPolicy> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::RefundPolicySnapshot(refund_id))
     }
 
     fn enforce_refund_policy(

@@ -389,3 +389,259 @@ fn test_get_collateral_balance_unknown_merchant() {
     let unknown = Address::generate(&s.env);
     assert_eq!(s.client.get_collateral_balance(&unknown), 0);
 }
+
+// ===========================================================================
+//  Additional Collateral Tests
+// ===========================================================================
+
+#[test]
+fn test_multiple_merchants_independent_collateral() {
+    let s = collateral_setup();
+    let merchant1 = Address::generate(&s.env);
+    let merchant2 = Address::generate(&s.env);
+    let merchant3 = Address::generate(&s.env);
+
+    s.usdc_admin_client.mint(&merchant1, &5_000_000);
+    s.usdc_admin_client.mint(&merchant2, &3_000_000);
+    s.usdc_admin_client.mint(&merchant3, &2_000_000);
+
+    // Each merchant deposits different amounts
+    s.client.deposit_collateral(&merchant1, &2_000_000i128);
+    s.client.deposit_collateral(&merchant2, &1_500_000i128);
+    s.client.deposit_collateral(&merchant3, &1_000_000i128);
+
+    // Verify each merchant has independent collateral
+    assert_eq!(s.client.get_collateral_balance(&merchant1), 2_000_000);
+    assert_eq!(s.client.get_collateral_balance(&merchant2), 1_500_000);
+    assert_eq!(s.client.get_collateral_balance(&merchant3), 1_000_000);
+
+    // Withdraw from one merchant shouldn't affect others
+    s.client.withdraw_collateral(&merchant1, &500_000i128);
+    assert_eq!(s.client.get_collateral_balance(&merchant1), 1_500_000);
+    assert_eq!(s.client.get_collateral_balance(&merchant2), 1_500_000);
+    assert_eq!(s.client.get_collateral_balance(&merchant3), 1_000_000);
+}
+
+#[test]
+fn test_withdraw_exact_balance_above_minimum() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+    s.usdc_admin_client.mint(&merchant, &5_000_000);
+
+    // Deposit 2x minimum
+    s.client.deposit_collateral(&merchant, &2_000_000i128);
+    
+    // Withdraw exactly 1x minimum, leaving 1x minimum (boundary case)
+    s.client.withdraw_collateral(&merchant, &1_000_000i128);
+
+    assert_eq!(s.client.get_collateral_balance(&merchant), 1_000_000);
+    assert_eq!(s.usdc_client.balance(&merchant), 4_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Withdrawal would drop collateral below minimum required")]
+fn test_withdraw_one_token_below_minimum_panics() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+    s.usdc_admin_client.mint(&merchant, &5_000_000);
+
+    s.client.deposit_collateral(&merchant, &2_000_000i128);
+    
+    // Try to withdraw 1_000_001, leaving 999_999 which is below minimum
+    s.client.withdraw_collateral(&merchant, &1_000_001i128);
+}
+
+#[test]
+fn test_admin_can_change_min_collateral_multiple_times() {
+    let s = collateral_setup();
+    
+    // Change minimum several times
+    s.client.set_min_collateral(&500_000i128);
+    assert_eq!(s.client.get_min_collateral(), 500_000);
+
+    s.client.set_min_collateral(&2_000_000i128);
+    assert_eq!(s.client.get_min_collateral(), 2_000_000);
+
+    s.client.set_min_collateral(&750_000i128);
+    assert_eq!(s.client.get_min_collateral(), 750_000);
+
+    s.client.set_min_collateral(&0i128);
+    assert_eq!(s.client.get_min_collateral(), 0);
+}
+
+#[test]
+fn test_merchant_with_pending_collateral_can_deposit_more() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+    s.usdc_admin_client.mint(&merchant, &10_000_000);
+
+    // Initial deposit
+    s.client.deposit_collateral(&merchant, &1_000_000i128);
+    
+    // Merchant decides to add more collateral later
+    s.client.deposit_collateral(&merchant, &2_000_000i128);
+    s.client.deposit_collateral(&merchant, &500_000i128);
+
+    assert_eq!(s.client.get_collateral_balance(&merchant), 3_500_000);
+}
+
+#[test]
+fn test_multiple_disputes_slash_collateral_progressively() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+    let customer1 = Address::generate(&s.env);
+    let customer2 = Address::generate(&s.env);
+
+    // Merchant deposits substantial collateral
+    s.usdc_admin_client.mint(&merchant, &10_000_000);
+    s.client.deposit_collateral(&merchant, &5_000_000i128);
+    s.client.approve_merchant(&merchant);
+
+    // First payment and dispute
+    s.usdc_admin_client.mint(&customer1, &1_000_000);
+    let payment_id1 = s.client.create_payment(
+        &customer1,
+        &merchant,
+        &300_000i128,
+        &s.usdc_addr,
+        &None,
+        &None,
+        &None,
+    );
+    s.client.dispute_payment(
+        &customer1,
+        &payment_id1,
+        &soroban_sdk::String::from_str(&s.env, "Issue 1"),
+    );
+    s.client.resolve_dispute(&payment_id1, &false);
+    
+    assert_eq!(s.client.get_collateral_balance(&merchant), 4_700_000);
+
+    // Second payment and dispute
+    s.usdc_admin_client.mint(&customer2, &1_000_000);
+    let payment_id2 = s.client.create_payment(
+        &customer2,
+        &merchant,
+        &500_000i128,
+        &s.usdc_addr,
+        &None,
+        &None,
+        &None,
+    );
+    s.client.dispute_payment(
+        &customer2,
+        &payment_id2,
+        &soroban_sdk::String::from_str(&s.env, "Issue 2"),
+    );
+    s.client.resolve_dispute(&payment_id2, &false);
+
+    // Collateral slashed twice
+    assert_eq!(s.client.get_collateral_balance(&merchant), 4_200_000);
+}
+
+#[test]
+fn test_merchant_can_top_up_collateral_after_slash() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+
+    s.usdc_admin_client.mint(&merchant, &10_000_000);
+    s.client.deposit_collateral(&merchant, &3_000_000i128);
+    s.client.approve_merchant(&merchant);
+
+    // Create and resolve dispute (slash collateral)
+    s.usdc_admin_client.mint(&customer, &1_000_000);
+    let payment_id = s.client.create_payment(
+        &customer,
+        &merchant,
+        &500_000i128,
+        &s.usdc_addr,
+        &None,
+        &None,
+        &None,
+    );
+    s.client.dispute_payment(
+        &customer,
+        &payment_id,
+        &soroban_sdk::String::from_str(&s.env, "Problem"),
+    );
+    s.client.resolve_dispute(&payment_id, &false);
+
+    assert_eq!(s.client.get_collateral_balance(&merchant), 2_500_000);
+
+    // Merchant tops up collateral
+    s.client.deposit_collateral(&merchant, &1_000_000i128);
+    assert_eq!(s.client.get_collateral_balance(&merchant), 3_500_000);
+}
+
+#[test]
+fn test_zero_collateral_minimum_allows_approval_without_deposit() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+
+    // Set minimum to zero
+    s.client.set_min_collateral(&0i128);
+
+    // Should be able to approve without any collateral
+    s.client.approve_merchant(&merchant);
+    assert!(s.client.is_merchant_approved(&merchant));
+    assert_eq!(s.client.get_collateral_balance(&merchant), 0);
+}
+
+#[test]
+fn test_large_collateral_deposit() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+    
+    // Test with a very large amount (100 million)
+    let large_amount = 100_000_000i128;
+    s.usdc_admin_client.mint(&merchant, &large_amount);
+
+    s.client.deposit_collateral(&merchant, &large_amount);
+    assert_eq!(s.client.get_collateral_balance(&merchant), large_amount);
+    assert_eq!(s.usdc_client.balance(&merchant), 0);
+}
+
+#[test]
+fn test_collateral_state_persists_across_operations() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+    s.usdc_admin_client.mint(&merchant, &10_000_000);
+
+    // Deposit
+    s.client.deposit_collateral(&merchant, &3_000_000i128);
+    let balance_after_deposit = s.client.get_collateral_balance(&merchant);
+    assert_eq!(balance_after_deposit, 3_000_000);
+
+    // Approve merchant
+    s.client.approve_merchant(&merchant);
+    let balance_after_approval = s.client.get_collateral_balance(&merchant);
+    assert_eq!(balance_after_approval, 3_000_000);
+
+    // Withdraw some
+    s.client.withdraw_collateral(&merchant, &500_000i128);
+    let balance_after_withdrawal = s.client.get_collateral_balance(&merchant);
+    assert_eq!(balance_after_withdrawal, 2_500_000);
+
+    // Deposit more
+    s.client.deposit_collateral(&merchant, &1_000_000i128);
+    let final_balance = s.client.get_collateral_balance(&merchant);
+    assert_eq!(final_balance, 3_500_000);
+}
+
+#[test]
+#[should_panic(expected = "Merchant collateral below minimum required")]
+fn test_raising_min_collateral_affects_new_approvals() {
+    let s = collateral_setup();
+    let merchant = Address::generate(&s.env);
+    s.usdc_admin_client.mint(&merchant, &5_000_000);
+
+    // Deposit 1.5M with minimum at 1M
+    s.client.deposit_collateral(&merchant, &1_500_000i128);
+
+    // Admin raises minimum to 2M
+    s.client.set_min_collateral(&2_000_000i128);
+
+    // Attempt to approve with insufficient collateral (under new minimum)
+    s.client.approve_merchant(&merchant);
+}

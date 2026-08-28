@@ -183,9 +183,11 @@ mod test_suspension;
 
 pub use client::TokenWhitelistClient;
 
+#[cfg(feature = "contract")]
 #[contract]
 pub struct TokenWhitelistContract;
 
+#[cfg(feature = "contract")]
 #[contractimpl]
 impl TokenWhitelistContract {
     pub fn initialize(env: Env, admin: Address) {

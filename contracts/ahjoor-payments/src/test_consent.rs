@@ -4,8 +4,7 @@ use super::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
-    vec, Address, BytesN, Env, String,
+    testutils::{Address as _, Ledger}, Address, BytesN, Env, String,
 };
 
 struct TestSetup<'a> {
@@ -407,7 +406,7 @@ fn test_list_active_consent_records() {
         &terms_version_v2,
         &expiry_ledger,
     );
-    let consent_unsigned = s.client.create_consent_record(
+    let _consent_unsigned = s.client.create_consent_record(
         &merchant,
         &customer,
         &terms_hash_v3,

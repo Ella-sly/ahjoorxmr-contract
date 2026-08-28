@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, Bytes,
-    BytesN, Env, Map, String, Symbol, Vec,
+    contracterror, contracttype, Address,
+    BytesN, Env, Map, String, Vec,
 };
 
 /// Pre-approved spending allowance with on-chain consent record

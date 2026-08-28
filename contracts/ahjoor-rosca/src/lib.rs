@@ -1339,6 +1339,9 @@ impl AhjoorContract {
             panic_with_error!(&env, Error::DeadlineNotPassed);
         }
 
+        // #790: settle prepaid balances before identifying defaulters
+        Self::apply_prepaid_contributions(&env);
+
         let members: Vec<Address> = env.storage().instance().get(&DataKey::Members).unwrap();
         let paid_members: Vec<Address> =
             env.storage().instance().get(&DataKey::PaidMembers).unwrap();
@@ -1473,6 +1476,9 @@ impl AhjoorContract {
         if env.ledger().timestamp() <= deadline {
             panic_with_error!(&env, Error::DeadlineNotPassed);
         }
+
+        // #790: settle prepaid balances before identifying defaulters
+        Self::apply_prepaid_contributions(&env);
 
         let members: Vec<Address> = env.storage().instance().get(&DataKey::Members).unwrap();
         let paid_members: Vec<Address> =
@@ -2782,6 +2788,38 @@ impl AhjoorContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// #749: Returns (auction_enabled, auction_window_ledgers, auction_open_until, auction_round)
+    /// so callers can check whether an auction is currently open, which round it targets,
+    /// and when the bidding window closes, without inferring it from bid events.
+    pub fn get_auction_status(env: Env) -> (bool, u64, u64, u32) {
+        let auction_enabled: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey3::AuctionEnabled)
+            .unwrap_or(false);
+        let auction_window_ledgers: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::AuctionWindowLedgers)
+            .unwrap_or(0);
+        let auction_open_until: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::AuctionOpenUntil)
+            .unwrap_or(0);
+        let auction_round: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::AuctionRound)
+            .unwrap_or(0);
+        (
+            auction_enabled,
+            auction_window_ledgers,
+            auction_open_until,
+            auction_round,
+        )
+    }
+
     // ─── Cross-Group Member Migration ────────────────────────────────────────
 
     /// Returns the base token address of this group (used by cross-contract migration checks).
@@ -3499,6 +3537,31 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Returns the configured (min_seconds, max_seconds) bounds for round
+    /// duration updates (#752). Falls back to the same defaults enforced
+    /// internally by `update_round_duration` when unset.
+    pub fn get_round_duration_bounds(env: Env) -> (u64, u64) {
+        let min_dur: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey4::MinRoundDuration)
+            .unwrap_or(60);
+        let max_dur: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey4::MaxRoundDuration)
+            .unwrap_or(u64::MAX);
+        (min_dur, max_dur)
+    }
+
+    /// Returns the pending round duration change scheduled by
+    /// `update_round_duration`, if any (#752).
+    pub fn get_pending_round_duration(env: Env) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey4::PendingRoundDuration)
+    }
+
     /// Admin manually penalises a specific defaulter from the current round's
     /// defaulters list. Transfers the penalty amount from the member to the
     /// contract and updates their default count and suspension status.
@@ -3582,6 +3645,15 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the currently configured co-signer grace window, in ledgers
+    /// (#747). Falls back to the same default used internally when unset.
+    pub fn get_co_signer_window(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey4::CoSignerWindowLedgers)
+            .unwrap_or(0)
     }
 
     /// Member requests a grace-period deferral of their pending penalty.
@@ -6367,6 +6439,26 @@ impl AhjoorContract {
             .unwrap_or(51)
     }
 
+    /// #751: Read the per-ProposalType quorum override set via `set_quorum_per_type`,
+    /// falling back to the same global-default-derived quorum used internally when unset.
+    pub fn get_quorum_for_type(env: Env, proposal_type: ProposalType) -> u32 {
+        let quorum_config: Map<ProposalType, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::QuorumConfig)
+            .unwrap_or(Map::new(&env));
+        if let Some(q) = quorum_config.get(proposal_type) {
+            q
+        } else {
+            let global_q: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::QuorumPercentage)
+                .unwrap_or(51);
+            global_q * 100
+        }
+    }
+
     /// Update the protocol fee configuration. Admin only.
     /// Fee is capped at 500 bps (5%).
     pub fn update_fee(env: Env, new_fee_bps: u32) {
@@ -6722,8 +6814,24 @@ impl AhjoorContract {
         }
         let request = requests.get(member.clone()).unwrap();
 
-        // Compute penalty and refund dynamically based on current state.
-        // This ensures members who already received a payout round are penalized on net balance.
+        let refund_amount =
+            Self::execute_early_exit(&env, &member, request.rounds_contributed);
+
+        requests.remove(member.clone());
+        env.storage()
+            .temporary()
+            .set(&DataKey2::ExitRequests, &requests);
+
+        events::emit_exit_ok(&env, member.clone(), refund_amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Shared early-exit removal + penalty logic used by admin-approved emergency
+    /// exit and deferred voluntary exit finalization (#792).
+    fn execute_early_exit(env: &Env, member: &Address, rounds_contributed: u32) -> i128 {
         let contribution_amount: i128 = env
             .storage()
             .instance()
@@ -6735,17 +6843,16 @@ impl AhjoorContract {
             .get(&DataKey::ExitPenaltyBps)
             .unwrap_or(0);
 
-        let contributed_total = contribution_amount * (request.rounds_contributed as i128);
+        let contributed_total = contribution_amount * (rounds_contributed as i128);
 
-        // Sum payouts the member has received from round history
         let history: Vec<PayoutRecord> = env
             .storage()
             .persistent()
             .get(&PersistentKey::RoundHistory)
-            .unwrap_or(Vec::new(&env));
+            .unwrap_or(Vec::new(env));
         let mut received_payout = 0i128;
         for record in history.iter() {
-            if record.recipient == member {
+            if record.recipient == *member {
                 received_payout += record.amount;
             }
         }
@@ -6756,19 +6863,18 @@ impl AhjoorContract {
 
         if refund_amount > 0 {
             let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-            let client = token::Client::new(&env, &token_addr);
-            client.transfer(&env.current_contract_address(), &member, &refund_amount);
+            let client = token::Client::new(env, &token_addr);
+            client.transfer(&env.current_contract_address(), member, &refund_amount);
         }
 
-        // Remove from Members list
         let old_members: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::Members)
-            .unwrap_or(Vec::new(&env));
-        let mut new_members: Vec<Address> = Vec::new(&env);
+            .unwrap_or(Vec::new(env));
+        let mut new_members: Vec<Address> = Vec::new(env);
         for m in old_members.iter() {
-            if m != member {
+            if m != *member {
                 new_members.push_back(m);
             }
         }
@@ -6776,36 +6882,38 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::Members, &new_members);
 
-        // Add to ExitedMembers
         let mut exited_members: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::ExitedMembers)
-            .unwrap_or(Vec::new(&env));
+            .unwrap_or(Vec::new(env));
         exited_members.push_back(member.clone());
         env.storage()
             .instance()
             .set(&DataKey::ExitedMembers, &exited_members);
 
-        requests.remove(member.clone());
-        env.storage()
-            .temporary()
-            .set(&DataKey2::ExitRequests, &requests);
+        // Clear any leftover prepaid balance for the exiting member (#790)
+        let mut prepaid: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::PrepaidBalances)
+            .unwrap_or(Map::new(env));
+        if prepaid.contains_key(member.clone()) {
+            prepaid.remove(member.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey4::PrepaidBalances, &prepaid);
+        }
 
-        // #389: Compact PayoutOrder so renumbered slots no longer point at
-        // the exited member. Skipped automatically when the member's slot was
-        // already paid out by an earlier round. `skip_reason = 0` means the
-        // compactor ran; `1` means past-slot guard tripped; `2` means the
-        // member was absent from `PayoutOrder` (defensive).
         let current_round: u32 = env
             .storage()
             .instance()
             .get(&DataKey::CurrentRound)
             .unwrap_or(0);
         let (_, slot_index, old_len, new_len, skip_reason) =
-            internals::compact_payout_order(&env, &member, current_round);
+            internals::compact_payout_order(env, member, current_round);
         events::emit_payout_order_compacted(
-            &env,
+            env,
             member.clone(),
             slot_index,
             old_len,
@@ -6814,25 +6922,20 @@ impl AhjoorContract {
             skip_reason,
         );
 
-        Self::update_credit_score_internal(&env, &member, Symbol::new(&env, "early_exit"));
-        events::emit_exit_ok(&env, member.clone(), refund_amount);
+        Self::update_credit_score_internal(env, member, Symbol::new(env, "early_exit"));
 
-        // #352: Rebalance contributions after member departure (only if no waitlist fills the slot)
         let waitlist: Vec<(Address, u64)> = env
             .storage()
             .instance()
             .get(&DataKey2::Waitlist)
-            .unwrap_or(Vec::new(&env));
+            .unwrap_or(Vec::new(env));
         if waitlist.is_empty() {
-            Self::try_rebalance_contribution(&env, Symbol::new(&env, "member_left"));
+            Self::try_rebalance_contribution(env, Symbol::new(env, "member_left"));
         }
 
-        // Auto-promote from waitlist to fill the vacancy
-        Self::try_promote_from_waitlist(&env, &member);
+        Self::try_promote_from_waitlist(env, member);
 
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        refund_amount
     }
 
     pub fn reject_exit(env: Env, member: Address) {
@@ -6877,6 +6980,335 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::ExitedMembers)
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ── #792: Configurable voluntary exit notice period ───────────────────────
+
+    /// Admin sets the notice period (in ledgers) before a voluntary exit takes effect.
+    /// `0` preserves immediate-exit behaviour on `request_voluntary_exit`.
+    pub fn set_exit_notice_ledgers(env: Env, admin: Address, exit_notice_ledgers: u32) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        if admin != stored_admin {
+            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey4::ExitNoticeLedgers, &exit_notice_ledgers);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_exit_notice_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey4::ExitNoticeLedgers)
+            .unwrap_or(0)
+    }
+
+    /// Request a voluntary exit. When `exit_notice_ledgers > 0`, records a deferred
+    /// request and keeps the member contribution-liable until `effective_ledger`.
+    /// When notice is `0`, runs the existing early-exit removal/penalty logic immediately.
+    pub fn request_voluntary_exit(env: Env, member: Address) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+
+        let exited_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExitedMembers)
+            .unwrap_or(Vec::new(&env));
+        if exited_members.contains(&member) {
+            panic_with_error!(&env, Error::MemberAlreadyExited);
+        }
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&member) {
+            panic_with_error!(&env, Error::NotAMember);
+        }
+
+        let paid_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaidMembers)
+            .unwrap_or(Vec::new(&env));
+        if !paid_members.is_empty() {
+            panic_with_error!(&env, Error::ExitNotAllowedMidRound);
+        }
+
+        let mut voluntary: Map<Address, VoluntaryExitRequest> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::VoluntaryExitRequests)
+            .unwrap_or(Map::new(&env));
+        if voluntary.contains_key(member.clone()) {
+            panic_with_error!(&env, ExtError2::VoluntaryExitPending);
+        }
+
+        // Also block if an emergency exit request is already pending
+        let emergency: Map<Address, ExitRequest> = env
+            .storage()
+            .temporary()
+            .get(&DataKey2::ExitRequests)
+            .unwrap_or(Map::new(&env));
+        if emergency.contains_key(member.clone()) {
+            panic_with_error!(&env, Error::ExitRequestPending);
+        }
+
+        let current_round: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentRound)
+            .unwrap_or(0);
+        let notice: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey4::ExitNoticeLedgers)
+            .unwrap_or(0);
+
+        if notice == 0 {
+            let refund = Self::execute_early_exit(&env, &member, current_round);
+            events::emit_exit_ok(&env, member, refund);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+            return;
+        }
+
+        let effective_ledger = env.ledger().sequence().saturating_add(notice);
+        voluntary.set(
+            member.clone(),
+            VoluntaryExitRequest {
+                effective_ledger,
+                rounds_contributed: current_round,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey4::VoluntaryExitRequests, &voluntary);
+
+        events::emit_voluntary_exit_requested(&env, member, effective_ledger);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Permissionlessly finalize a voluntary exit once `effective_ledger` is reached.
+    pub fn finalize_voluntary_exit(env: Env, member: Address) {
+        internals::check_not_paused(&env);
+
+        let mut voluntary: Map<Address, VoluntaryExitRequest> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::VoluntaryExitRequests)
+            .unwrap_or(Map::new(&env));
+        let request = match voluntary.get(member.clone()) {
+            Some(r) => r,
+            None => panic_with_error!(&env, ExtError2::NoVoluntaryExitRequest),
+        };
+
+        if env.ledger().sequence() < request.effective_ledger {
+            panic_with_error!(&env, ExtError2::ExitNoticeNotElapsed);
+        }
+
+        let paid_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaidMembers)
+            .unwrap_or(Vec::new(&env));
+        if !paid_members.is_empty() {
+            panic_with_error!(&env, Error::ExitNotAllowedMidRound);
+        }
+
+        let refund_amount =
+            Self::execute_early_exit(&env, &member, request.rounds_contributed);
+
+        voluntary.remove(member.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey4::VoluntaryExitRequests, &voluntary);
+
+        events::emit_exit_ok(&env, member, refund_amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Member rescinds a pending voluntary exit before it becomes effective.
+    pub fn cancel_voluntary_exit(env: Env, member: Address) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+
+        let mut voluntary: Map<Address, VoluntaryExitRequest> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::VoluntaryExitRequests)
+            .unwrap_or(Map::new(&env));
+        if !voluntary.contains_key(member.clone()) {
+            panic_with_error!(&env, ExtError2::NoVoluntaryExitRequest);
+        }
+
+        voluntary.remove(member.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey4::VoluntaryExitRequests, &voluntary);
+
+        events::emit_voluntary_exit_cancelled(&env, member);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_voluntary_exit_request(env: Env, member: Address) -> Option<VoluntaryExitRequest> {
+        let voluntary: Map<Address, VoluntaryExitRequest> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::VoluntaryExitRequests)
+            .unwrap_or(Map::new(&env));
+        voluntary.get(member)
+    }
+
+    // ── #790: Advance contribution prepayment ─────────────────────────────────
+
+    /// Prepay `num_rounds` worth of contributions in one transfer. Funds are
+    /// held in `PrepaidBalance` and auto-consumed when rounds settle.
+    pub fn prepay_rounds(env: Env, member: Address, num_rounds: u32) {
+        internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
+        member.require_auth();
+
+        if num_rounds == 0 {
+            panic_with_error!(&env, ExtError2::InvalidPrepayRounds);
+        }
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&member) {
+            panic_with_error!(&env, Error::NotAMember);
+        }
+
+        let exited_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExitedMembers)
+            .unwrap_or(Vec::new(&env));
+        if exited_members.contains(&member) {
+            panic_with_error!(&env, Error::MemberHasExited);
+        }
+
+        let contribution_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ContributionAmt)
+            .unwrap_or(0);
+        let tiers: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::MemberTiers)
+            .unwrap_or(Map::new(&env));
+        let tier_bps = tiers.get(member.clone()).unwrap_or(10_000);
+        let member_required = (contribution_amount * tier_bps as i128) / 10_000;
+        let total = member_required
+            .checked_mul(num_rounds as i128)
+            .expect("prepay overflow");
+
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let client = token::Client::new(&env, &token_addr);
+        client.transfer(&member, &env.current_contract_address(), &total);
+
+        let mut prepaid: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::PrepaidBalances)
+            .unwrap_or(Map::new(&env));
+        let prev = prepaid.get(member.clone()).unwrap_or(0);
+        prepaid.set(member.clone(), prev + total);
+        env.storage()
+            .instance()
+            .set(&DataKey4::PrepaidBalances, &prepaid);
+
+        // Apply immediately against the current round if the member is unpaid
+        Self::apply_prepaid_for_member(&env, &member);
+
+        events::emit_rounds_prepaid(&env, member, num_rounds, total);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_prepaid_balance(env: Env, member: Address) -> i128 {
+        let prepaid: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::PrepaidBalances)
+            .unwrap_or(Map::new(&env));
+        prepaid.get(member).unwrap_or(0)
+    }
+
+    /// Withdraw unused prepaid balance that has not been consumed by round settlement.
+    pub fn withdraw_prepaid_balance(env: Env, member: Address, amount: i128) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+
+        if amount <= 0 {
+            panic_with_error!(&env, Error::AmountMustBePositive);
+        }
+
+        let mut prepaid: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::PrepaidBalances)
+            .unwrap_or(Map::new(&env));
+        let balance = prepaid.get(member.clone()).unwrap_or(0);
+        if amount > balance {
+            panic_with_error!(&env, ExtError2::InsufficientPrepaidBalance);
+        }
+
+        let remaining = balance - amount;
+        if remaining == 0 {
+            prepaid.remove(member.clone());
+        } else {
+            prepaid.set(member.clone(), remaining);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey4::PrepaidBalances, &prepaid);
+
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let client = token::Client::new(&env, &token_addr);
+        client.transfer(&env.current_contract_address(), &member, &amount);
+
+        events::emit_prepaid_withdrawn(&env, member, amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Consume prepaid balances to mark unpaid members as contributed for the current round.
+    fn apply_prepaid_contributions(env: &Env) {
+        internals::apply_prepaid_contributions(env);
+    }
+
+    fn apply_prepaid_for_member(env: &Env, member: &Address) {
+        internals::apply_prepaid_for_member(env, member);
     }
 
     // --- FEATURE 1: DELEGATED VOTING FOR GOVERNANCE PROPOSALS ---
@@ -7517,6 +7949,19 @@ impl AhjoorContract {
         events::emit_slot_swap_executed(env, swap_id, swap.round_a, swap.round_b);
     }
 
+    /// #748: Look up a slot swap's current status/initiator/counterparty by id.
+    pub fn get_slot_swap(env: Env, swap_id: u32) -> SlotSwap {
+        let swaps: Map<u32, SlotSwap> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SlotSwaps)
+            .unwrap_or(Map::new(&env));
+        match swaps.get(swap_id) {
+            Some(swap) => swap,
+            None => panic_with_error!(&env, ExtError2::SwapNotFound),
+        }
+    }
+
     // ─── #214: Insurance Coverage Mode ───────────────────────────────────────
 
     pub fn set_insurance_coverage_mode(env: Env, admin: Address, mode: InsuranceCoverageMode) {
@@ -7534,6 +7979,14 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey2::InsuranceCoverageMode, &mode);
         events::emit_insurance_coverage_mode_set(&env, mode as u32);
+    }
+
+    /// #750: Read back the group's insurance coverage mode, defaulting to `None` if unset.
+    pub fn get_insurance_coverage_mode(env: Env) -> InsuranceCoverageMode {
+        env.storage()
+            .instance()
+            .get(&DataKey2::InsuranceCoverageMode)
+            .unwrap_or(InsuranceCoverageMode::None)
     }
 
     pub fn set_insurance_pool_low_threshold(env: Env, admin: Address, threshold: i128) {
@@ -9939,6 +10392,12 @@ impl AhjoorContract {
             .unwrap_or(0)
     }
 
+    /// Get treasury configuration (admin and enabled flag), if the group
+    /// treasury has been enabled (#753).
+    pub fn get_treasury_config(env: Env) -> Option<TreasuryConfig> {
+        env.storage().instance().get(&DataKey3::TreasuryConfig)
+    }
+
     /// Internal: update a member's credit score after a relevant event.
     fn update_credit_score_internal(env: &Env, member: &Address, reason: Symbol) {
         let mut scores: Map<Address, MemberScore> = env
@@ -10697,6 +11156,15 @@ impl AhjoorContract {
         repayment_window_ledgers: u32,
     ) -> u32 {
         member.require_auth();
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&member) {
+            panic_with_error!(&env, Error::NotAMember);
+        }
 
         if amount <= 0 {
             panic!("Loan amount must be positive");
@@ -11666,6 +12134,7 @@ mod test;
 mod test_audit_trail;
 mod test_contrib_delegation;
 mod test_cosigner_guarantee;
+mod test_emergency_loan;
 mod test_emergency_reserve;
 mod test_group_freeze;
 mod test_group_split;
@@ -11676,5 +12145,8 @@ mod test_quorum;
 mod test_savings_milestone_rewards;
 mod test_skip;
 mod test_snapshot;
+mod test_view_functions;
 mod test_waitlist;
+mod test_voluntary_exit;
+mod test_prepay;
 pub use events::*;

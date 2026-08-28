@@ -311,6 +311,26 @@ pub enum EscrowErrorExt4 {
 pub enum EscrowErrorExt5 {
     /// Inspector must be an independent third party, not the buyer or seller.
     InspectorCannotBeBuyerOrSeller = 1,
+    /// #800: min funding threshold must be positive when set.
+    MinFundingThresholdMustBePositive = 2,
+    /// #799: parent escrow does not exist.
+    ParentEscrowNotFound = 3,
+    /// #799: cannot link an escrow to itself as parent.
+    CannotLinkEscrowToItself = 4,
+    /// #797: creation bond must be positive when set.
+    CreationBondMustBePositive = 5,
+    /// #797: funding deadline ledgers must be positive when a creation bond is set.
+    FundingDeadlineMustBePositive = 6,
+    /// #797: abandonment bond cannot be claimed before the funding deadline.
+    FundingDeadlineNotElapsed = 7,
+    /// #797: escrow has already been funded; abandonment claim is invalid.
+    EscrowAlreadyFunded = 8,
+    /// #797: no creation bond is held for this escrow.
+    NoCreationBond = 9,
+    /// #797: escrow is not eligible for abandonment (wrong status).
+    EscrowNotAbandonable = 10,
+    /// #797/#800: deposit amount must be positive.
+    DepositAmountMustBePositive = 11,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,6 +363,42 @@ pub enum EscrowStatus {
     BountyClaimed = 15,
     /// #361: Collateral value dropped below required ratio; release blocked.
     UnderCollateralized = 16,
+    /// #797: Buyer abandoned an unfunded escrow; creation bond forfeited to seller.
+    Abandoned = 17,
+}
+
+/// #799: Aggregate status of a parent escrow and its linked children.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum ProjectStatus {
+    /// No children linked yet, or children still open/in progress.
+    InProgress = 0,
+    /// Every linked child has been Released or Resolved.
+    AllReleased = 1,
+    /// At least one child is in a disputed state.
+    HasDispute = 2,
+    /// Every linked child has been Refunded.
+    AllRefunded = 3,
+    /// Children are in mixed terminal states (e.g. some released, some refunded).
+    Mixed = 4,
+    /// At least one child was Abandoned (buyer never funded).
+    HasAbandoned = 5,
+}
+
+/// Optional feature flags for escrow creation (#797, #799, #800).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowFeatureOpts {
+    /// #800: Accumulated deposits must reach this amount before work is authorized.
+    /// `None` => work authorized immediately (legacy behavior).
+    pub min_funding_threshold: Option<i128>,
+    /// #799: Optional parent escrow this child belongs to.
+    pub parent_escrow_id: Option<u32>,
+    /// #797: Optional creation bond held separately from principal.
+    pub creation_bond: Option<i128>,
+    /// #797: Ledgers after creation before an unfunded escrow may be claimed abandoned.
+    /// Required when `creation_bond` is set.
+    pub funding_deadline_ledgers: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -799,6 +855,26 @@ pub enum DataKey2 {
     RenewalOriginalId(u32),
 }
 
+/// Overflow storage keys beyond DataKey2 (50-variant limit).
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey3 {
+    /// #800: minimum accumulated funding required before work is authorized
+    MinFundingThreshold(u32),
+    /// #800: whether work has been authorized for this escrow
+    WorkAuthorized(u32),
+    /// #799: parent escrow id for a child (child_id → parent_id)
+    ParentEscrow(u32),
+    /// #799: ordered list of child escrow ids for a parent
+    ChildEscrows(u32),
+    /// #797: creation bond amount held for an escrow
+    CreationBond(u32),
+    /// #797: absolute ledger sequence after which abandonment may be claimed
+    FundingDeadlineLedger(u32),
+    /// #797: whether any principal has been deposited
+    PrincipalFunded(u32),
+}
+
 /// #357: On-chain reputation record for an inspector.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1145,6 +1221,47 @@ impl AhjoorEscrowContract {
         buyer.require_auth();
 
         Self::create_escrow_core(&env, &buyer, request)
+    }
+
+    /// Create an escrow with optional funding threshold, parent link, and/or creation bond
+    /// (#797, #799, #800).
+    pub fn create_escrow_with_features(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        amount: i128,
+        token: Address,
+        deadline: u64,
+        metadata_hash: Option<BytesN<32>>,
+        features: EscrowFeatureOpts,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        let request = EscrowCreateRequest {
+            seller,
+            arbiter,
+            amount,
+            token,
+            deadline,
+            metadata_hash,
+            sellers: Vec::new(&env),
+            auto_renew: false,
+            renewal_count: 0,
+            buyer_inactivity_secs: 0,
+            min_lock_until: None,
+            release_base: None,
+            release_quote: None,
+            release_comparison: None,
+            release_threshold_price: None,
+            arbiter_fee_bps: None,
+            dispute_default_winner: None,
+            auto_renew_max_renewals: None,
+            auto_renew_interval_ledgers: None,
+        };
+
+        Self::create_escrow_core_with_features(&env, &buyer, request, features)
     }
 
     /// Create a new escrow with an AutoRenewConfig for recurring service agreements.
@@ -1750,6 +1867,25 @@ impl AhjoorEscrowContract {
     }
 
     fn create_escrow_core(env: &Env, buyer: &Address, request: EscrowCreateRequest) -> u32 {
+        Self::create_escrow_core_with_features(
+            env,
+            buyer,
+            request,
+            EscrowFeatureOpts {
+                min_funding_threshold: None,
+                parent_escrow_id: None,
+                creation_bond: None,
+                funding_deadline_ledgers: None,
+            },
+        )
+    }
+
+    fn create_escrow_core_with_features(
+        env: &Env,
+        buyer: &Address,
+        request: EscrowCreateRequest,
+        features: EscrowFeatureOpts,
+    ) -> u32 {
         let EscrowCreateRequest {
             seller,
             arbiter,
@@ -1818,6 +1954,33 @@ impl AhjoorEscrowContract {
             }
         }
 
+        if let Some(threshold) = features.min_funding_threshold {
+            if threshold <= 0 {
+                panic_with_error!(&env, EscrowErrorExt5::MinFundingThresholdMustBePositive);
+            }
+        }
+
+        let defer_principal = features.creation_bond.is_some();
+        if let Some(bond) = features.creation_bond {
+            if bond <= 0 {
+                panic_with_error!(&env, EscrowErrorExt5::CreationBondMustBePositive);
+            }
+            let deadline_ledgers = features.funding_deadline_ledgers.unwrap_or(0);
+            if deadline_ledgers == 0 {
+                panic_with_error!(&env, EscrowErrorExt5::FundingDeadlineMustBePositive);
+            }
+        }
+
+        if let Some(parent_id) = features.parent_escrow_id {
+            let parent_exists: Option<Escrow> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Escrow(parent_id));
+            if parent_exists.is_none() {
+                panic_with_error!(&env, EscrowErrorExt5::ParentEscrowNotFound);
+            }
+        }
+
         // Token whitelist validation
         Self::require_token_allowed(&env, &token);
 
@@ -1842,9 +2005,20 @@ impl AhjoorEscrowContract {
             sellers
         };
 
-        // Transfer tokens from buyer to contract (escrow)
         let client = token::Client::new(env, &token);
-        client.transfer(buyer, &env.current_contract_address(), &amount);
+
+        // #797: Hold creation bond separately from principal.
+        if let Some(bond) = features.creation_bond {
+            client.transfer(buyer, &env.current_contract_address(), &bond);
+        }
+
+        // Transfer principal unless deferred behind a creation bond (#797).
+        let funded_amount = if defer_principal {
+            0i128
+        } else {
+            client.transfer(buyer, &env.current_contract_address(), &amount);
+            amount
+        };
 
         let escrow_id = Self::next_escrow_id(env);
 
@@ -1863,7 +2037,7 @@ impl AhjoorEscrowContract {
             buyer: buyer.clone(),
             seller: primary_seller.clone(),
             arbiter: arbiter.clone(),
-            amount,
+            amount: funded_amount,
             original_amount: amount,
             token: token.clone(),
             status: EscrowStatus::Active,
@@ -1906,6 +2080,86 @@ impl AhjoorEscrowContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+
+        // #797: Persist bond + funding deadline; principal starts unfunded when deferred.
+        if let Some(bond) = features.creation_bond {
+            let deadline_ledgers = features.funding_deadline_ledgers.unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&DataKey3::CreationBond(escrow_id), &bond);
+            env.storage().persistent().extend_ttl(
+                &DataKey3::CreationBond(escrow_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            let funding_deadline = env.ledger().sequence() + deadline_ledgers;
+            env.storage()
+                .persistent()
+                .set(&DataKey3::FundingDeadlineLedger(escrow_id), &funding_deadline);
+            env.storage().persistent().extend_ttl(
+                &DataKey3::FundingDeadlineLedger(escrow_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            env.storage()
+                .persistent()
+                .set(&DataKey3::PrincipalFunded(escrow_id), &false);
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey3::PrincipalFunded(escrow_id), &true);
+        }
+
+        // #800: Work authorization threshold
+        let threshold = features.min_funding_threshold.unwrap_or(0);
+        if threshold > 0 {
+            env.storage()
+                .persistent()
+                .set(&DataKey3::MinFundingThreshold(escrow_id), &threshold);
+            env.storage().persistent().extend_ttl(
+                &DataKey3::MinFundingThreshold(escrow_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+        let work_authorized = threshold == 0 || funded_amount >= threshold;
+        env.storage()
+            .persistent()
+            .set(&DataKey3::WorkAuthorized(escrow_id), &work_authorized);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::WorkAuthorized(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        if work_authorized && threshold > 0 {
+            events::emit_work_authorized(env, escrow_id);
+        }
+
+        // #799: Register parent/child link
+        if let Some(parent_id) = features.parent_escrow_id {
+            env.storage()
+                .persistent()
+                .set(&DataKey3::ParentEscrow(escrow_id), &parent_id);
+            env.storage().persistent().extend_ttl(
+                &DataKey3::ParentEscrow(escrow_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            let mut children: Vec<u32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey3::ChildEscrows(parent_id))
+                .unwrap_or(Vec::new(env));
+            children.push_back(escrow_id);
+            env.storage()
+                .persistent()
+                .set(&DataKey3::ChildEscrows(parent_id), &children);
+            env.storage().persistent().extend_ttl(
+                &DataKey3::ChildEscrows(parent_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
 
         // #150: Initialize LastBuyerAction to creation timestamp
         if buyer_inactivity_secs > 0 {
@@ -2195,6 +2449,9 @@ impl AhjoorEscrowContract {
             events::emit_collateral_returned(&env, escrow_id, escrow.seller.clone(), collateral);
             env.storage().persistent().remove(&DataKey::SellerCollateral(escrow_id));
         }
+
+        // #797: Refund creation bond to buyer on normal completion.
+        Self::refund_creation_bond_to_buyer(&env, escrow_id, &escrow);
 
         escrow.status = EscrowStatus::Released;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
@@ -3899,6 +4156,15 @@ impl AhjoorEscrowContract {
         (fee_bps, fee_recipient)
     }
 
+    /// Get accumulated protocol fees for a given token.
+    /// Returns the amount of fees accrued and awaiting withdrawal.
+    pub fn get_accrued_fees(env: Env, token: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::AccruedFees(token))
+            .unwrap_or(0)
+    }
+
     /// Withdraw accumulated protocol fees for a given token. Admin only.
     /// Emits a FeesWithdrawn event on success.
     /// Panics if amount is zero, exceeds the accrued balance, or caller is not admin.
@@ -4549,6 +4815,14 @@ impl AhjoorEscrowContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+
+        // #797: First principal deposit marks the escrow funded.
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PrincipalFunded(escrow_id), &true);
+
+        // #800: Emit WorkAuthorized exactly once when threshold is crossed.
+        Self::maybe_authorize_work(&env, escrow_id, new_total);
 
         // Emit event
         events::emit_escrow_topped_up(&env, escrow_id, additional_amount, new_total, buyer);
@@ -5990,6 +6264,9 @@ impl AhjoorEscrowContract {
                 Self::transfer_to_buyers(&env, &escrow, penalty_amount, escrow_id);
             }
         }
+
+        // #797: Refund creation bond to buyer on mutual cancellation.
+        Self::refund_creation_bond_to_buyer(&env, escrow_id, &escrow);
 
         escrow.status = EscrowStatus::Refunded;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
@@ -8116,7 +8393,10 @@ impl AhjoorEscrowContract {
     fn is_terminal_escrow_status(status: EscrowStatus) -> bool {
         matches!(
             status,
-            EscrowStatus::Released | EscrowStatus::Resolved | EscrowStatus::Refunded
+            EscrowStatus::Released
+                | EscrowStatus::Resolved
+                | EscrowStatus::Refunded
+                | EscrowStatus::Abandoned
         )
     }
 
@@ -9513,6 +9793,257 @@ impl AhjoorEscrowContract {
             .expect("No BPS milestones for this escrow")
     }
 
+    // ── #800 / #799 / #797 feature entrypoints ────────────────────────────────
+
+    /// #800: Returns true once accumulated deposits meet/exceed the min funding threshold.
+    /// Escrows created without a threshold are always authorized.
+    pub fn get_work_authorized(env: Env, escrow_id: u32) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::WorkAuthorized(escrow_id))
+            .unwrap_or(true)
+    }
+
+    /// #799: Return child escrow IDs linked to a parent.
+    pub fn get_child_escrows(env: Env, parent_escrow_id: u32) -> Vec<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::ChildEscrows(parent_escrow_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// #799: Aggregate project status derived from all linked child escrows.
+    pub fn get_project_status(env: Env, parent_escrow_id: u32) -> ProjectStatus {
+        let children: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ChildEscrows(parent_escrow_id))
+            .unwrap_or(Vec::new(&env));
+
+        if children.is_empty() {
+            return ProjectStatus::InProgress;
+        }
+
+        let mut has_dispute = false;
+        let mut has_abandoned = false;
+        let mut all_released = true;
+        let mut all_refunded = true;
+        let mut any_open = false;
+
+        for i in 0..children.len() {
+            let child_id = children.get(i).unwrap();
+            let child: Escrow = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Escrow(child_id))
+                .expect("Child escrow not found");
+
+            match child.status {
+                EscrowStatus::Disputed | EscrowStatus::PartiallyDisputed => {
+                    has_dispute = true;
+                    all_released = false;
+                    all_refunded = false;
+                }
+                EscrowStatus::Abandoned => {
+                    has_abandoned = true;
+                    all_released = false;
+                    all_refunded = false;
+                }
+                EscrowStatus::Released | EscrowStatus::Resolved => {
+                    all_refunded = false;
+                }
+                EscrowStatus::Refunded => {
+                    all_released = false;
+                }
+                _ => {
+                    any_open = true;
+                    all_released = false;
+                    all_refunded = false;
+                }
+            }
+        }
+
+        if has_dispute {
+            ProjectStatus::HasDispute
+        } else if has_abandoned {
+            ProjectStatus::HasAbandoned
+        } else if any_open {
+            ProjectStatus::InProgress
+        } else if all_released {
+            ProjectStatus::AllReleased
+        } else if all_refunded {
+            ProjectStatus::AllRefunded
+        } else {
+            ProjectStatus::Mixed
+        }
+    }
+
+    /// #797/#800: Deposit principal into an escrow (including deferred-funding escrows).
+    /// Marks the escrow funded and may emit WorkAuthorized when the threshold is crossed.
+    pub fn fund_escrow(env: Env, buyer: Address, escrow_id: u32, deposit_amount: i128) {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        if deposit_amount <= 0 {
+            panic_with_error!(&env, EscrowErrorExt5::DepositAmountMustBePositive);
+        }
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if buyer != escrow.buyer {
+            panic_with_error!(&env, EscrowErrorExt2::OnlyBuyerCanTopUpEscrow);
+        }
+        if escrow.status != EscrowStatus::Active && escrow.status != EscrowStatus::AwaitingInspection {
+            panic_with_error!(&env, EscrowErrorExt2::EscrowIsNotActiveOrAwaitingInspection);
+        }
+
+        let token_client = token::Client::new(&env, &escrow.token);
+        token_client.transfer(&buyer, &env.current_contract_address(), &deposit_amount);
+
+        let new_total = escrow.amount + deposit_amount;
+        escrow.amount = new_total;
+        let topup_entry = TopUpEntry {
+            amount: deposit_amount,
+            timestamp: env.ledger().timestamp(),
+            cumulative_total: new_total,
+        };
+        escrow.top_up_history.push_back(topup_entry);
+        escrow.top_up_acknowledged = false;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PrincipalFunded(escrow_id), &true);
+
+        Self::maybe_authorize_work(&env, escrow_id, new_total);
+        events::emit_escrow_topped_up(&env, escrow_id, deposit_amount, new_total, buyer);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #797: Anyone may claim the creation bond for the seller once the funding
+    /// deadline elapses without any principal deposit.
+    pub fn claim_abandonment_bond(env: Env, escrow_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if escrow.status != EscrowStatus::Active {
+            panic_with_error!(&env, EscrowErrorExt5::EscrowNotAbandonable);
+        }
+
+        let funded: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PrincipalFunded(escrow_id))
+            .unwrap_or(true);
+        if funded {
+            panic_with_error!(&env, EscrowErrorExt5::EscrowAlreadyFunded);
+        }
+
+        let deadline_ledger: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::FundingDeadlineLedger(escrow_id))
+            .unwrap_or(0);
+        if env.ledger().sequence() < deadline_ledger {
+            panic_with_error!(&env, EscrowErrorExt5::FundingDeadlineNotElapsed);
+        }
+
+        let bond: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::CreationBond(escrow_id))
+            .unwrap_or(0);
+        if bond <= 0 {
+            panic_with_error!(&env, EscrowErrorExt5::NoCreationBond);
+        }
+
+        let token_client = token::Client::new(&env, &escrow.token);
+        token_client.transfer(&env.current_contract_address(), &escrow.seller, &bond);
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::CreationBond(escrow_id));
+
+        escrow.status = EscrowStatus::Abandoned;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Abandoned);
+        Self::burn_receipt_if_exists(&env, escrow_id);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_abandonment_bond_claimed(&env, escrow_id, escrow.seller.clone(), bond);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #800: Flip work authorization exactly once when accumulated deposits cross the threshold.
+    fn maybe_authorize_work(env: &Env, escrow_id: u32, accumulated: i128) {
+        let already: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::WorkAuthorized(escrow_id))
+            .unwrap_or(true);
+        if already {
+            return;
+        }
+        let threshold: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::MinFundingThreshold(escrow_id))
+            .unwrap_or(0);
+        if threshold > 0 && accumulated >= threshold {
+            env.storage()
+                .persistent()
+                .set(&DataKey3::WorkAuthorized(escrow_id), &true);
+            events::emit_work_authorized(env, escrow_id);
+        }
+    }
+
+    /// #797: Return any remaining creation bond to the buyer and clear storage.
+    fn refund_creation_bond_to_buyer(env: &Env, escrow_id: u32, escrow: &Escrow) {
+        let bond: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::CreationBond(escrow_id))
+            .unwrap_or(0);
+        if bond <= 0 {
+            return;
+        }
+        let token_client = token::Client::new(env, &escrow.token);
+        token_client.transfer(&env.current_contract_address(), &escrow.buyer, &bond);
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::CreationBond(escrow_id));
+        events::emit_creation_bond_refunded(env, escrow_id, escrow.buyer.clone(), bond);
+    }
+
 }
 
 #[cfg(test)]
@@ -9549,3 +10080,6 @@ mod test_auto_renewal;
 
 #[cfg(test)]
 mod test_multiparty_approval;
+
+#[cfg(test)]
+mod test_funding_features;

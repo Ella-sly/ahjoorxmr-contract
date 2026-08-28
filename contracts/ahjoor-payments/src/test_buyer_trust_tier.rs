@@ -1,4 +1,4 @@
-#![cfg(test)]
+use soroban_sdk::testutils::Ledger;
 use super::*;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{testutils::Address as _, Address, Env};
@@ -34,7 +34,7 @@ fn setup<'a>() -> (
 
 #[test]
 fn test_set_and_get_buyer_tier() {
-    let (env, client, _admin, merchant, buyer, _token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, _token, _tac) = setup();
 
     // Default tier is New
     assert_eq!(client.get_buyer_tier(&merchant, &buyer), BuyerTrustTierLevel::New);
@@ -50,7 +50,7 @@ fn test_set_and_get_buyer_tier() {
 
 #[test]
 fn test_tier_downgrade_takes_effect_immediately() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Set VIP tier with high limit
     client.set_buyer_tier(&merchant, &buyer, &BuyerTrustTierLevel::VIP);
@@ -72,7 +72,7 @@ fn test_tier_downgrade_takes_effect_immediately() {
 
 #[test]
 fn test_tier_limit_falls_back_to_global_when_unset() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Set buyer tier but no tier-specific limit
     client.set_buyer_tier(&merchant, &buyer, &BuyerTrustTierLevel::Trusted);
@@ -88,7 +88,7 @@ fn test_tier_limit_falls_back_to_global_when_unset() {
 
 #[test]
 fn test_per_customer_override_takes_priority_over_tier() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Set Trusted tier with low limit
     client.set_buyer_tier(&merchant, &buyer, &BuyerTrustTierLevel::Trusted);
@@ -130,7 +130,7 @@ fn test_each_tier_has_independent_limit() {
 
 #[test]
 fn test_tier_upgrade_allows_higher_limit() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Start with New tier (low limit)
     client.set_tier_spending_limit(&merchant, &BuyerTrustTierLevel::New, &100i128, &3600u64);
@@ -207,7 +207,7 @@ fn test_tier_limit_window_resets() {
 
 #[test]
 fn test_standard_tier_distinct_from_new_and_trusted() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Set distinct limits for all tiers
     client.set_tier_spending_limit(&merchant, &BuyerTrustTierLevel::New, &50i128, &3600u64);
@@ -229,7 +229,7 @@ fn test_standard_tier_distinct_from_new_and_trusted() {
 
 #[test]
 fn test_vip_tier_has_highest_privileges() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Set VIP limit much higher than other tiers
     client.set_tier_spending_limit(&merchant, &BuyerTrustTierLevel::New, &100i128, &3600u64);
@@ -246,7 +246,7 @@ fn test_vip_tier_has_highest_privileges() {
 
 #[test]
 fn test_unset_tier_uses_new_tier_by_default() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Set New tier limit but don't explicitly assign buyer to any tier
     client.set_tier_spending_limit(&merchant, &BuyerTrustTierLevel::New, &200i128, &3600u64);
@@ -266,7 +266,7 @@ fn test_unset_tier_uses_new_tier_by_default() {
 
 #[test]
 fn test_tier_limit_accumulates_within_window() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     client.set_buyer_tier(&merchant, &buyer, &BuyerTrustTierLevel::Trusted);
     client.set_tier_spending_limit(&merchant, &BuyerTrustTierLevel::Trusted, &1_000i128, &3600u64);
@@ -291,7 +291,7 @@ fn test_tier_limit_accumulates_within_window() {
 
 #[test]
 fn test_tier_change_during_window_applies_new_limit() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Start with Trusted tier
     client.set_tier_spending_limit(&merchant, &BuyerTrustTierLevel::Trusted, &2_000i128, &3600u64);
@@ -312,7 +312,7 @@ fn test_tier_change_during_window_applies_new_limit() {
 
 #[test]
 fn test_removing_per_customer_override_falls_back_to_tier() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+    let (_env, client, _admin, merchant, buyer, token, _tac) = setup();
 
     // Set Trusted tier with moderate limit
     client.set_buyer_tier(&merchant, &buyer, &BuyerTrustTierLevel::Trusted);
@@ -325,8 +325,8 @@ fn test_removing_per_customer_override_falls_back_to_tier() {
     let p1 = client.create_payment(&buyer, &merchant, &5_000, &token, &None, &None, &None);
     client.complete_payment(&p1);
 
-    // Remove per-customer override by setting to 0
-    client.set_customer_spend_limit(&merchant, &buyer, &0i128, &3600u64);
+    // Remove per-customer override
+    client.remove_customer_spend_limit(&merchant, &buyer);
 
     // Now should fall back to tier limit; previous spend (5000) exceeds tier limit (1000)
     let p2 = client.create_payment(&buyer, &merchant, &100, &token, &None, &None, &None);
@@ -334,14 +334,15 @@ fn test_removing_per_customer_override_falls_back_to_tier() {
 }
 
 #[test]
-fn test_zero_tier_limit_blocks_all_payments() {
-    let (env, client, _admin, merchant, buyer, token, _tac) = setup();
+fn test_zero_tier_limit_rejected() {
+    let (_env, client, _admin, merchant, _buyer, _token, _tac) = setup();
 
-    // Set tier limit to zero
-    client.set_buyer_tier(&merchant, &buyer, &BuyerTrustTierLevel::New);
-    client.set_tier_spending_limit(&merchant, &BuyerTrustTierLevel::New, &0i128, &3600u64);
-
-    // Any payment should fail with zero limit
-    let p1 = client.create_payment(&buyer, &merchant, &1, &token, &None, &None, &None);
-    assert!(client.try_complete_payment(&p1).is_err());
+    // Spend limits must be positive; a zero tier limit is rejected
+    let result = client.try_set_tier_spending_limit(
+        &merchant,
+        &BuyerTrustTierLevel::New,
+        &0i128,
+        &3600u64,
+    );
+    assert!(result.is_err(), "Zero tier limit should be rejected");
 }
