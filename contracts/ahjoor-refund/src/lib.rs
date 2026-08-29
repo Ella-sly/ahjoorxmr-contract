@@ -6058,3 +6058,193 @@ mod test_deadline_boundaries;
 
 #[cfg(test)]
 mod test_getters;
+/// Event: Customer appealed a rejected refund (#159)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundAppealed {
+    pub refund_id: u32,
+    pub customer: Address,
+}
+
+/// Event: Admin resolved a refund appeal (#159)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AppealResolved {
+    pub refund_id: u32,
+    pub approved: bool,
+}
+
+/// Event: Refund requested
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundRequested {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub reason: String,
+}
+
+/// Event: Refund approved
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundApproved {
+    pub refund_id: u32,
+    pub approved_by: Address,
+    pub approved_at: u64,
+}
+
+/// Event: Refund rejected
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundRejected {
+    pub refund_id: u32,
+    pub rejected_by: Address,
+    pub rejection_reason: String,
+    pub rejected_at: u64,
+}
+
+/// Event: Refund processed (tokens transferred)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundProcessed {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+    pub processed_at: u64,
+}
+
+/// Event: Contract WASM upgraded
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractUpgraded {
+    pub old_version: u32,
+    pub new_version: u32,
+    pub by_admin: Address,
+}
+
+/// Event: Contract paused
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractPaused {
+    pub admin: Address,
+    pub reason: String,
+    pub timestamp: u64,
+}
+
+/// Event: Contract resumed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractResumed {
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Event: Merchant made a counter-offer on a refund request
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundCounterOffered {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub counter_amount: i128,
+    pub expires_at: u64,
+}
+
+/// Event: Customer accepted the counter-offer
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundCounterAccepted {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+}
+
+/// Event: Customer rejected the counter-offer (escalated to admin)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundCounterRejected {
+    pub refund_id: u32,
+    pub customer: Address,
+}
+
+/// Event: Counter-offer expired and auto-settled
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CounterOfferExpired {
+    pub refund_id: u32,
+    /// true = original refund accepted, false = rejected
+    pub resolution: bool,
+    pub original_amount: i128,
+}
+
+/// Event: Refund auto-approved after dispute window elapsed without merchant response
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundAutoApproved {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+}
+
+/// Event: Refund auto-approved via whitelist
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundAutoApprovedWhitelist {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+/// Event: Escrow refund registered
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowRefundRegistered {
+    pub refund_id: u32,
+    pub escrow_id: u32,
+    pub buyer: Address,
+    pub amount: i128,
+}
+
+/// Event: Refund fee collected
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundFeeCollected {
+    pub refund_id: u32,
+    pub fee_amount: i128,
+}
+
+/// Event: Partial refund cap threshold reached
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PartialRefundCapApplied {
+    pub refund_id: u32,
+    pub remaining_refundable: i128,
+}
+
+/// Event: Tier applied to a refund request
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundTierApplied {
+    pub refund_id: u32,
+    pub tier_bps: u32,
+    pub max_refundable: i128,
+}
+
+/// Event: Merchant initiated immediate refund
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantInitiatedRefund {
+    pub refund_id: u32,
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub reason_code: u32,
+}
+
+/// Event: Bulk approved refunds processed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BulkRefundProcessed {
+    pub count: u32,
+    pub total_amount: i128,
+}
