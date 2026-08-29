@@ -220,4 +220,23 @@ pub enum ExtError2 {
     InvalidPrepayRounds = 124,
     /// Insufficient prepaid balance to withdraw (#790).
     InsufficientPrepaidBalance = 125,
+    // ── Scoped Co-Admin Role ──────────────────────────────────────────────────
+    /// The caller is not a co-admin of this group.
+    NotACoAdminRole = 126,
+    /// The co-admin does not hold the required permission for this action.
+    CoAdminPermissionDenied = 127,
+    /// The address is already registered as a co-admin.
+    CoAdminAlreadyExists = 128,
+    /// No co-admin record found for this address.
+    CoAdminNotFound = 129,
+    /// The permissions list provided is empty; a co-admin must have at least one permission.
+    CoAdminEmptyPermissions = 130,
+    // ── Concurrent Group Membership Cap ──────────────────────────────────────
+    /// The address has reached its concurrent active group membership cap.
+    MembershipCapReached = 131,
+    /// The membership cap value is out of the allowed range (0 = unlimited, max 255).
+    InvalidMembershipCap = 132,
+    // ── Group Cloning ─────────────────────────────────────────────────────────
+    /// The source contract address provided for cloning is invalid (same as this contract).
+    CloneSourceInvalid = 133,
 }
