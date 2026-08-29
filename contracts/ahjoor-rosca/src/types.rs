@@ -425,6 +425,110 @@ pub enum DataKey5 {
     // #544: smallest cycle_number not yet archived, so `archive_old_records`
     // can find archival candidates without scanning every persisted cycle.
     OldestPersistentCycle,
+
+    // ── Scoped Co-Admin Role ──────────────────────────────────────────────────
+    /// Map<Address, CoAdminRecord> — all registered co-admins and their scopes.
+    CoAdmins,
+    /// Set of permissions granted to each co-admin: Map<Address, Vec<CoAdminPermission>>.
+    CoAdminPermissions,
+
+    // ── Concurrent Group Membership Cap ──────────────────────────────────────
+    /// u32 — max number of groups a single address may be concurrently active in.
+    /// 0 = unlimited (default).
+    MaxConcurrentMemberships,
+    /// Map<Address, u32> — tracks how many concurrent active groups each address
+    /// is currently a member of.
+    MembershipCount,
+
+    // ── Group Cloning ─────────────────────────────────────────────────────────
+    /// Option<GroupCloneRecord> — metadata written when this contract was created
+    /// by cloning another group.  None when the group was created from scratch.
+    CloneOrigin,
+}
+
+// ── Scoped Co-Admin Role ──────────────────────────────────────────────────────
+
+/// Fine-grained permissions that can be delegated to a co-admin.
+/// A co-admin may hold any non-empty subset of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum CoAdminPermission {
+    /// Can call `add_member` / `remove_member`.
+    ManageMembers = 0,
+    /// Can call `suspend_member` / `reinstate_member` paths.
+    SuspendMembers = 1,
+    /// Can call `freeze_group` / `unfreeze_group`.
+    FreezeGroup = 2,
+    /// Can call `pause_contract` / `resume_contract`.
+    PauseContract = 3,
+    /// Can add / remove approved tokens and set exchange rates.
+    ManageTokens = 4,
+    /// Can update round configuration (duration, grace period, etc.).
+    ManageRoundConfig = 5,
+}
+
+/// Record stored per co-admin address.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoAdminRecord {
+    /// Address of the co-admin.
+    pub co_admin: Address,
+    /// The specific permissions granted to this co-admin.
+    pub permissions: Vec<CoAdminPermission>,
+    /// Ledger sequence at which this co-admin was added.
+    pub added_at_ledger: u32,
+    /// Whether this co-admin is currently active (admin can deactivate without removing).
+    pub active: bool,
+}
+
+// ── Group Cloning ─────────────────────────────────────────────────────────────
+
+/// Metadata that records the origin of a cloned group.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupCloneRecord {
+    /// Address of the source contract that was cloned.
+    pub source_contract: Address,
+    /// Ledger sequence at which the clone was created.
+    pub cloned_at_ledger: u32,
+    /// Timestamp at which the clone was created.
+    pub cloned_at_timestamp: u64,
+    /// Address of the admin who initiated the clone.
+    pub cloned_by: Address,
+}
+
+/// Field-by-field overrides applied on top of the source contract's config
+/// during `clone_group`.  Every field is `Option<T>`: `None` means "inherit
+/// from source", `Some(v)` means "use this value instead".
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupCloneOverrides {
+    pub contribution_amount: Option<i128>,
+    pub token: Option<Address>,
+    pub round_duration: Option<u64>,
+    pub fee_bps: Option<u32>,
+    pub fee_recipient: Option<Address>,
+    pub max_defaults: Option<u32>,
+    pub grace_period_ledgers: Option<u32>,
+    pub grace_period_seconds: Option<u64>,
+    pub penalty_amount: Option<i128>,
+    pub exit_penalty_bps: Option<u32>,
+    pub skip_fee: Option<i128>,
+    pub max_skips_per_cycle: Option<u32>,
+    pub use_timestamp_schedule: Option<bool>,
+    pub round_duration_seconds: Option<u64>,
+    pub voting_mode: Option<VotingMode>,
+    pub auction_enabled: Option<bool>,
+    pub auction_window_ledgers: Option<u64>,
+    pub max_members: Option<u32>,
+    pub reserve_enabled: Option<bool>,
+    pub reserve_contribution_bps: Option<u32>,
+    pub strategy: Option<PayoutStrategy>,
+    pub custom_order: Option<Vec<Address>>,
+    pub collective_goal: Option<i128>,
+    pub member_goals: Option<Map<Address, i128>>,
+    pub late_fee_bps: Option<u32>,
+    pub randomize_payout_order: Option<bool>,
 }
 
 
