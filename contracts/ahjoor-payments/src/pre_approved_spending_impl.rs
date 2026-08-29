@@ -29,6 +29,12 @@ fn customer_allowances_key(env: &Env, customer: &Address) -> (Symbol, Address) {
 fn merchant_allowances_key(env: &Env, merchant: &Address) -> (Symbol, Address) {
     (Symbol::new(env, "merch_allows"), merchant.clone())
 }
+fn allowance_transactions_key(env: &Env, allowance_id: u32) -> (Symbol, u32) {
+    (Symbol::new(env, "allow_txs"), allowance_id)
+}
+fn allowance_audit_logs_key(env: &Env, allowance_id: u32) -> (Symbol, u32) {
+    (Symbol::new(env, "allow_audit"), allowance_id)
+}
 
 /// Implementation of pre-approved spending functionality
 pub struct PreApprovedSpendingImpl;
@@ -290,6 +296,15 @@ impl PreApprovedSpendingImpl {
         // Store transaction
         env.storage().persistent().set(&transaction_key(env, next_tx_id), &transaction);
 
+        let tx_key = allowance_transactions_key(env, allowance_id);
+        let mut allowance_transactions: Vec<AllowanceTransaction> = env
+            .storage()
+            .persistent()
+            .get(&tx_key)
+            .unwrap_or_else(|| Vec::new(env));
+        allowance_transactions.push_back(transaction.clone());
+        env.storage().persistent().set(&tx_key, &allowance_transactions);
+
         // Store updated allowance
         env.storage().persistent().set(&key, &allowance);
         env.storage()
@@ -435,13 +450,19 @@ impl PreApprovedSpendingImpl {
     }
 
     /// Get allowance transaction history
-    pub fn get_allowance_transactions(env: &Env, _allowance_id: u32) -> Vec<AllowanceTransaction> {
-        Vec::new(env)
+    pub fn get_allowance_transactions(env: &Env, allowance_id: u32) -> Vec<AllowanceTransaction> {
+        env.storage()
+            .persistent()
+            .get(&allowance_transactions_key(env, allowance_id))
+            .unwrap_or_else(|| Vec::new(env))
     }
 
     /// Get audit log for an allowance
-    pub fn get_audit_log(env: &Env, _allowance_id: u32) -> Vec<AllowanceAuditLog> {
-        Vec::new(env)
+    pub fn get_audit_log(env: &Env, allowance_id: u32) -> Vec<AllowanceAuditLog> {
+        env.storage()
+            .persistent()
+            .get(&allowance_audit_logs_key(env, allowance_id))
+            .unwrap_or_else(|| Vec::new(env))
     }
 
     /// Get all allowances for a customer
@@ -545,8 +566,71 @@ impl PreApprovedSpendingImpl {
         };
 
         env.storage().persistent().set(&audit_log_key(env, next_log_id), &log);
+
+        let audit_key = allowance_audit_logs_key(env, allowance_id);
+        let mut allowance_logs: Vec<AllowanceAuditLog> = env
+            .storage()
+            .persistent()
+            .get(&audit_key)
+            .unwrap_or_else(|| Vec::new(env));
+        allowance_logs.push_back(log.clone());
+        env.storage().persistent().set(&audit_key, &allowance_logs);
+
         env.storage()
             .instance()
             .set(&Symbol::new(env, AUDIT_LOG_COUNTER_KEY), &next_log_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_bytes32(env: &Env, seed: u8) -> BytesN<32> {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        BytesN::from_array(env, &bytes)
+    }
+
+    #[test]
+    fn test_allowance_history_and_audit_log_are_retrievable() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let customer = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let token = Address::generate(&env);
+        let metadata = Map::new(&env);
+
+        let allowance_id = PreApprovedSpendingImpl::create_allowance(
+            &env,
+            customer.clone(),
+            merchant.clone(),
+            token.clone(),
+            1000,
+            200,
+            500,
+            1_000_000,
+            make_bytes32(&env, 1),
+            metadata,
+        );
+
+        let tx = PreApprovedSpendingImpl::spend_from_allowance(
+            &env,
+            allowance_id,
+            125,
+            String::from_str(&env, "invoice-1"),
+        );
+
+        let history = PreApprovedSpendingImpl::get_allowance_transactions(&env, allowance_id);
+        let audit = PreApprovedSpendingImpl::get_audit_log(&env, allowance_id);
+
+        assert_eq!(history.len(), 1);
+        let first_tx = history.get(0).unwrap();
+        assert_eq!(first_tx.tx_id, tx.tx_id);
+        assert_eq!(first_tx.allowance_id, allowance_id);
+        assert_eq!(audit.len(), 2);
+        let first_log = audit.get(0).unwrap();
+        assert_eq!(first_log.allowance_id, allowance_id);
     }
 }
