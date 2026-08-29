@@ -12128,6 +12128,558 @@ impl AhjoorContract {
             .get(&DataKey3::ContributionReceiptCounter)
             .unwrap_or(0)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Scoped Co-Admin Role ──────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Internal helper — read the co-admin map from DataKey5::CoAdmins.
+    fn load_co_admins(env: &Env) -> Map<Address, CoAdminRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKey5::CoAdmins)
+            .unwrap_or(Map::new(env))
+    }
+
+    /// Internal helper — persist the co-admin map.
+    fn save_co_admins(env: &Env, map: &Map<Address, CoAdminRecord>) {
+        env.storage().instance().set(&DataKey5::CoAdmins, map);
+    }
+
+    /// Internal helper — check that `caller` is the stored admin.
+    fn require_admin(env: &Env, caller: &Address) {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if *caller != stored {
+            panic_with_error!(env, ExtError::OnlyAdminAllowed);
+        }
+    }
+
+    /// Internal helper — verify that `caller` is an active co-admin with the
+    /// given `permission`.  Returns the `CoAdminRecord` on success.
+    ///
+    /// Used by admin-gated functions that want to accept EITHER the primary
+    /// admin OR a co-admin with the relevant permission.
+    fn require_co_admin_permission(
+        env: &Env,
+        caller: &Address,
+        permission: CoAdminPermission,
+    ) -> CoAdminRecord {
+        let co_admins = Self::load_co_admins(env);
+        let record = co_admins
+            .get(caller.clone())
+            .unwrap_or_else(|| panic_with_error!(env, ExtError2::NotACoAdminRole));
+        if !record.active {
+            panic_with_error!(env, ExtError2::NotACoAdminRole);
+        }
+        let mut has_perm = false;
+        for i in 0..record.permissions.len() {
+            if record.permissions.get(i).unwrap() == permission {
+                has_perm = true;
+                break;
+            }
+        }
+        if !has_perm {
+            panic_with_error!(env, ExtError2::CoAdminPermissionDenied);
+        }
+        record
+    }
+
+    /// Internal helper — returns true when `caller` is either the primary admin
+    /// OR an active co-admin that holds `permission`.
+    fn is_admin_or_co_admin(env: &Env, caller: &Address, permission: CoAdminPermission) -> bool {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(env, ExtError::OnlyAdminAllowed));
+        if *caller == stored {
+            return true;
+        }
+        let co_admins = Self::load_co_admins(env);
+        if let Some(record) = co_admins.get(caller.clone()) {
+            if !record.active {
+                return false;
+            }
+            for i in 0..record.permissions.len() {
+                if record.permissions.get(i).unwrap() == permission {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Admin: register a new co-admin with a scoped set of permissions.
+    ///
+    /// - `admin`       — must be the primary group admin.
+    /// - `co_admin`    — address to elevate; must not already be registered.
+    /// - `permissions` — non-empty list of `CoAdminPermission` values.
+    pub fn add_co_admin(
+        env: Env,
+        admin: Address,
+        co_admin: Address,
+        permissions: Vec<CoAdminPermission>,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        internals::check_not_paused(&env);
+
+        if permissions.is_empty() {
+            panic_with_error!(&env, ExtError2::CoAdminEmptyPermissions);
+        }
+
+        let mut co_admins = Self::load_co_admins(&env);
+        if co_admins.contains_key(co_admin.clone()) {
+            panic_with_error!(&env, ExtError2::CoAdminAlreadyExists);
+        }
+
+        let perm_count = permissions.len() as u32;
+        let record = CoAdminRecord {
+            co_admin: co_admin.clone(),
+            permissions,
+            added_at_ledger: env.ledger().sequence(),
+            active: true,
+        };
+        co_admins.set(co_admin.clone(), record);
+        Self::save_co_admins(&env, &co_admins);
+
+        events::emit_co_admin_added(&env, admin, co_admin, perm_count);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin: permanently remove a co-admin.
+    ///
+    /// - `admin`    — must be the primary group admin.
+    /// - `co_admin` — address to remove; must already be registered.
+    pub fn remove_co_admin(env: Env, admin: Address, co_admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        internals::check_not_paused(&env);
+
+        let mut co_admins = Self::load_co_admins(&env);
+        if !co_admins.contains_key(co_admin.clone()) {
+            panic_with_error!(&env, ExtError2::CoAdminNotFound);
+        }
+        co_admins.remove(co_admin.clone());
+        Self::save_co_admins(&env, &co_admins);
+
+        events::emit_co_admin_removed(&env, admin, co_admin);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin: activate or deactivate a co-admin without removing their record.
+    ///
+    /// Deactivated co-admins retain their permission set but cannot act until
+    /// reactivated.
+    ///
+    /// - `admin`    — must be the primary group admin.
+    /// - `co_admin` — must already be registered.
+    /// - `active`   — `true` to reactivate, `false` to deactivate.
+    pub fn set_co_admin_active(env: Env, admin: Address, co_admin: Address, active: bool) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        internals::check_not_paused(&env);
+
+        let mut co_admins = Self::load_co_admins(&env);
+        let mut record = co_admins
+            .get(co_admin.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, ExtError2::CoAdminNotFound));
+        record.active = active;
+        co_admins.set(co_admin.clone(), record);
+        Self::save_co_admins(&env, &co_admins);
+
+        events::emit_co_admin_status_changed(&env, admin, co_admin, active);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin: replace the permission set of an existing co-admin.
+    ///
+    /// - `admin`       — must be the primary group admin.
+    /// - `co_admin`    — must already be registered.
+    /// - `permissions` — non-empty replacement list.
+    pub fn update_co_admin_permissions(
+        env: Env,
+        admin: Address,
+        co_admin: Address,
+        permissions: Vec<CoAdminPermission>,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        internals::check_not_paused(&env);
+
+        if permissions.is_empty() {
+            panic_with_error!(&env, ExtError2::CoAdminEmptyPermissions);
+        }
+
+        let mut co_admins = Self::load_co_admins(&env);
+        let mut record = co_admins
+            .get(co_admin.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, ExtError2::CoAdminNotFound));
+        let perm_count = permissions.len() as u32;
+        record.permissions = permissions;
+        co_admins.set(co_admin.clone(), record);
+        Self::save_co_admins(&env, &co_admins);
+
+        events::emit_co_admin_permissions_updated(&env, admin, co_admin, perm_count);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// View: return the `CoAdminRecord` for `co_admin`, or panic with
+    /// `CoAdminNotFound` if not registered.
+    pub fn get_co_admin(env: Env, co_admin: Address) -> CoAdminRecord {
+        let co_admins = Self::load_co_admins(&env);
+        co_admins
+            .get(co_admin)
+            .unwrap_or_else(|| panic_with_error!(&env, ExtError2::CoAdminNotFound))
+    }
+
+    /// View: return all registered co-admins as a map.
+    pub fn get_all_co_admins(env: Env) -> Map<Address, CoAdminRecord> {
+        Self::load_co_admins(&env)
+    }
+
+    /// View: return `true` when `caller` is an active co-admin with `permission`.
+    pub fn has_co_admin_permission(
+        env: Env,
+        caller: Address,
+        permission: CoAdminPermission,
+    ) -> bool {
+        Self::is_admin_or_co_admin(&env, &caller, permission)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Concurrent Active Group Membership Cap ────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Internal helper — read this group's concurrent-membership cap.
+    /// Returns 0 when unlimited.
+    fn load_membership_cap(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey5::MaxConcurrentMemberships)
+            .unwrap_or(0u32)
+    }
+
+    /// Internal helper — read an address's current active-group count from
+    /// persistent storage (so it survives instance TTL rolls).
+    fn load_membership_count(env: &Env, member: &Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey5::MembershipCount)
+            .unwrap_or(Map::<Address, u32>::new(env))
+            .get(member.clone())
+            .unwrap_or(0u32)
+    }
+
+    /// Internal helper — atomically increment a member's active-group count
+    /// and enforce the cap.  Call this whenever a member joins THIS group.
+    fn increment_membership_count(env: &Env, member: &Address) {
+        let cap = Self::load_membership_cap(env);
+        let mut counts: Map<Address, u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey5::MembershipCount)
+            .unwrap_or(Map::new(env));
+        let current = counts.get(member.clone()).unwrap_or(0u32);
+        if cap > 0 && current >= cap {
+            panic_with_error!(env, ExtError2::MembershipCapReached);
+        }
+        let new_count = current.saturating_add(1);
+        counts.set(member.clone(), new_count);
+        env.storage()
+            .persistent()
+            .set(&DataKey5::MembershipCount, &counts);
+        env.storage().persistent().extend_ttl(
+            &DataKey5::MembershipCount,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_membership_count_incremented(env, member.clone(), new_count);
+    }
+
+    /// Internal helper — decrement a member's active-group count.
+    /// Call this when a member exits or is removed from THIS group.
+    fn decrement_membership_count(env: &Env, member: &Address) {
+        let mut counts: Map<Address, u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey5::MembershipCount)
+            .unwrap_or(Map::new(env));
+        let current = counts.get(member.clone()).unwrap_or(0u32);
+        let new_count = current.saturating_sub(1);
+        if new_count == 0 {
+            counts.remove(member.clone());
+        } else {
+            counts.set(member.clone(), new_count);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey5::MembershipCount, &counts);
+        env.storage().persistent().extend_ttl(
+            &DataKey5::MembershipCount,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_membership_count_decremented(env, member.clone(), new_count);
+    }
+
+    /// Admin (or co-admin with `ManageRoundConfig`): set the maximum number of
+    /// concurrent active group memberships allowed per address.
+    ///
+    /// - `cap = 0`      — unlimited (default).
+    /// - `cap = 1..255` — hard limit; `add_member` / `join_group_tiered` /
+    ///                    `enroll_from_waitlist` will reject addresses that have
+    ///                    already reached this count.
+    /// - `cap > 255`    — rejected with `InvalidMembershipCap`.
+    pub fn set_membership_cap(env: Env, admin: Address, cap: u32) {
+        admin.require_auth();
+        internals::check_not_paused(&env);
+
+        // Accept primary admin OR co-admin with ManageRoundConfig.
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            // Verify co-admin permission
+            Self::require_co_admin_permission(&env, &admin, CoAdminPermission::ManageRoundConfig);
+        }
+
+        if cap > 255 {
+            panic_with_error!(&env, ExtError2::InvalidMembershipCap);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey5::MaxConcurrentMemberships, &cap);
+
+        events::emit_membership_cap_set(&env, admin, cap);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// View: return the configured concurrent membership cap (0 = unlimited).
+    pub fn get_membership_cap(env: Env) -> u32 {
+        Self::load_membership_cap(&env)
+    }
+
+    /// View: return how many concurrent active groups `member` is currently in
+    /// (as tracked by this contract's persistent store).
+    pub fn get_membership_count(env: Env, member: Address) -> u32 {
+        Self::load_membership_count(&env, &member)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Group Cloning ─────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Launch a new group on THIS contract instance by copying the core
+    /// configuration from `source_contract` and then overriding selected fields
+    /// via `overrides`.
+    ///
+    /// Concretely, `clone_group`:
+    ///   1. Reads `contribution_amount`, `token`, `round_duration`,
+    ///      `round_duration_seconds`, `use_timestamp_schedule`, `fee_bps`,
+    ///      `max_defaults`, `grace_period_ledgers`, `grace_period_seconds`,
+    ///      `penalty_amount`, `exit_penalty_bps`, `skip_fee`,
+    ///      `max_skips_per_cycle`, `voting_mode`, `auction_enabled`,
+    ///      `auction_window_ledgers`, `max_members`, `reserve_enabled`, and
+    ///      `reserve_contribution_bps` from the source contract's instance
+    ///      storage.
+    ///   2. Applies any non-`None` values from `overrides` on top.
+    ///   3. Calls `init` with the resolved `RoscaConfig` and the caller-supplied
+    ///      `admin`, `members`, and `start_at`.
+    ///   4. Records a `GroupCloneRecord` under `DataKey5::CloneOrigin`.
+    ///   5. Emits `GroupCloned`.
+    ///
+    /// This contract must NOT already be initialized (same guard as `init`).
+    /// `source_contract` must differ from `env.current_contract_address()`.
+    ///
+    /// # Parameters
+    /// - `admin`           — admin of the new group (must sign).
+    /// - `members`         — initial member list for the new group.
+    /// - `source_contract` — address of an existing ROSCA contract to copy config from.
+    /// - `overrides`       — optional field-by-field overrides applied after reading source.
+    /// - `start_at`        — optional delayed-start timestamp.
+    pub fn clone_group(
+        env: Env,
+        admin: Address,
+        members: Vec<Address>,
+        source_contract: Address,
+        overrides: GroupCloneOverrides,
+        start_at: Option<u64>,
+    ) {
+        admin.require_auth();
+
+        // Guard: cannot clone from self.
+        if source_contract == env.current_contract_address() {
+            panic_with_error!(&env, ExtError2::CloneSourceInvalid);
+        }
+
+        // Guard: this contract must not already be initialized.
+        if env.storage().instance().has(&DataKey::Members) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+
+        // ── Read config from the source contract via its client ───────────────
+        let src = RoscaCloneClient::new(&env, &source_contract);
+
+        let contribution_amount = overrides
+            .contribution_amount
+            .unwrap_or_else(|| src.get_contribution_amount());
+
+        let token = overrides.token.unwrap_or_else(|| src.get_token());
+
+        let round_duration = overrides
+            .round_duration
+            .unwrap_or_else(|| src.get_round_duration());
+
+        let fee_bps = overrides.fee_bps.unwrap_or_else(|| src.get_fee_bps());
+
+        let fee_recipient = overrides.fee_recipient;
+
+        let max_defaults = overrides
+            .max_defaults
+            .unwrap_or_else(|| src.get_max_defaults());
+
+        let grace_period_ledgers = overrides
+            .grace_period_ledgers
+            .unwrap_or_else(|| src.get_grace_period_ledgers());
+
+        let grace_period_seconds = overrides
+            .grace_period_seconds
+            .unwrap_or_else(|| src.get_grace_period_seconds());
+
+        let penalty_amount = overrides
+            .penalty_amount
+            .unwrap_or_else(|| src.get_penalty_amount());
+
+        let exit_penalty_bps = overrides
+            .exit_penalty_bps
+            .unwrap_or_else(|| src.get_exit_penalty_bps());
+
+        let skip_fee = overrides.skip_fee.unwrap_or_else(|| src.get_skip_fee());
+
+        let max_skips_per_cycle = overrides
+            .max_skips_per_cycle
+            .unwrap_or_else(|| src.get_max_skips_per_cycle());
+
+        let use_timestamp_schedule = overrides
+            .use_timestamp_schedule
+            .unwrap_or_else(|| src.get_use_timestamp_schedule());
+
+        let round_duration_seconds = overrides
+            .round_duration_seconds
+            .unwrap_or_else(|| src.get_round_duration_seconds());
+
+        let voting_mode = overrides
+            .voting_mode
+            .unwrap_or_else(|| src.get_voting_mode());
+
+        let auction_enabled = overrides
+            .auction_enabled
+            .unwrap_or_else(|| src.get_auction_enabled());
+
+        let auction_window_ledgers = overrides
+            .auction_window_ledgers
+            .unwrap_or_else(|| src.get_auction_window_ledgers());
+
+        let max_members = overrides
+            .max_members
+            .or_else(|| src.get_max_members_opt());
+
+        let reserve_enabled = overrides
+            .reserve_enabled
+            .unwrap_or_else(|| src.get_reserve_enabled());
+
+        let reserve_contribution_bps = overrides
+            .reserve_contribution_bps
+            .unwrap_or_else(|| src.get_reserve_contribution_bps());
+
+        // ── Build RoscaConfig ────────────────────────────────────────────────
+        let config = RoscaConfig {
+            strategy: overrides.strategy.unwrap_or(PayoutStrategy::RoundRobin),
+            custom_order: overrides.custom_order,
+            penalty_amount,
+            exit_penalty_bps,
+            collective_goal: overrides.collective_goal,
+            member_goals: overrides.member_goals,
+            fee_bps,
+            fee_recipient,
+            max_defaults,
+            grace_period_ledgers,
+            use_timestamp_schedule,
+            round_duration_seconds,
+            max_members,
+            skip_fee,
+            max_skips_per_cycle,
+            voting_mode,
+            late_fee_bps: overrides.late_fee_bps.unwrap_or(0),
+            grace_period_seconds,
+            auction_enabled,
+            auction_window_ledgers,
+            randomize_payout_order: overrides.randomize_payout_order.unwrap_or(false),
+            reserve_enabled,
+            reserve_contribution_bps,
+        };
+
+        // ── Initialize the new group ─────────────────────────────────────────
+        let member_count = members.len() as u32;
+        Self::init(
+            env.clone(),
+            admin.clone(),
+            members,
+            contribution_amount,
+            token,
+            round_duration,
+            config,
+            start_at,
+        );
+
+        // ── Record clone origin ──────────────────────────────────────────────
+        let clone_record = GroupCloneRecord {
+            source_contract: source_contract.clone(),
+            cloned_at_ledger: env.ledger().sequence(),
+            cloned_at_timestamp: env.ledger().timestamp(),
+            cloned_by: admin.clone(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey5::CloneOrigin, &clone_record);
+
+        events::emit_group_cloned(
+            &env,
+            source_contract,
+            admin,
+            member_count,
+            contribution_amount,
+        );
+        // TTL already bumped by init; no extra extend needed.
+    }
+
+    /// View: return clone-origin metadata for this group, or `None` when the
+    /// group was not created by cloning.
+    pub fn get_clone_origin(env: Env) -> Option<GroupCloneRecord> {
+        env.storage().instance().get(&DataKey5::CloneOrigin)
+    }
+
+    /// View: return `true` when this group was initialized via `clone_group`.
+    pub fn is_cloned_group(env: Env) -> bool {
+        env.storage().instance().has(&DataKey5::CloneOrigin)
+    }
 }
 
 mod test;

@@ -2065,3 +2065,159 @@ pub fn emit_prepaid_consumed(e: &Env, member: Address, round: u32, amount: i128)
 pub fn emit_prepaid_withdrawn(e: &Env, member: Address, amount: i128) {
     PrepaidWithdrawn { member, amount }.publish(e);
 }
+
+// ── Scoped Co-Admin Role ──────────────────────────────────────────────────────
+
+/// Event: A co-admin was added to the group.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CoAdminAdded {
+    /// The admin who performed the action.
+    pub admin: Address,
+    /// The new co-admin address.
+    pub co_admin: Address,
+    /// Number of permissions granted.
+    pub permission_count: u32,
+}
+
+/// Event: A co-admin was removed from the group.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CoAdminRemoved {
+    /// The admin who performed the action.
+    pub admin: Address,
+    /// The co-admin that was removed.
+    pub co_admin: Address,
+}
+
+/// Event: A co-admin's active status was toggled.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CoAdminStatusChanged {
+    /// The admin who performed the action.
+    pub admin: Address,
+    /// The co-admin whose status changed.
+    pub co_admin: Address,
+    /// New active state.
+    pub active: bool,
+}
+
+/// Event: A co-admin's permission set was updated.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CoAdminPermissionsUpdated {
+    /// The admin who performed the action.
+    pub admin: Address,
+    /// The co-admin whose permissions were updated.
+    pub co_admin: Address,
+    /// New number of permissions.
+    pub permission_count: u32,
+}
+
+pub fn emit_co_admin_added(e: &Env, admin: Address, co_admin: Address, permission_count: u32) {
+    CoAdminAdded {
+        admin,
+        co_admin,
+        permission_count,
+    }
+    .publish(e);
+}
+
+pub fn emit_co_admin_removed(e: &Env, admin: Address, co_admin: Address) {
+    CoAdminRemoved { admin, co_admin }.publish(e);
+}
+
+pub fn emit_co_admin_status_changed(e: &Env, admin: Address, co_admin: Address, active: bool) {
+    CoAdminStatusChanged {
+        admin,
+        co_admin,
+        active,
+    }
+    .publish(e);
+}
+
+pub fn emit_co_admin_permissions_updated(
+    e: &Env,
+    admin: Address,
+    co_admin: Address,
+    permission_count: u32,
+) {
+    CoAdminPermissionsUpdated {
+        admin,
+        co_admin,
+        permission_count,
+    }
+    .publish(e);
+}
+
+// ── Concurrent Group Membership Cap ──────────────────────────────────────────
+
+/// Event: The concurrent membership cap was configured.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MembershipCapSet {
+    /// Admin who set the cap.
+    pub admin: Address,
+    /// New cap value (0 = unlimited).
+    pub cap: u32,
+}
+
+/// Event: An address's tracked membership count was incremented.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MembershipCountIncremented {
+    pub member: Address,
+    pub new_count: u32,
+}
+
+/// Event: An address's tracked membership count was decremented.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MembershipCountDecremented {
+    pub member: Address,
+    pub new_count: u32,
+}
+
+pub fn emit_membership_cap_set(e: &Env, admin: Address, cap: u32) {
+    MembershipCapSet { admin, cap }.publish(e);
+}
+
+pub fn emit_membership_count_incremented(e: &Env, member: Address, new_count: u32) {
+    MembershipCountIncremented { member, new_count }.publish(e);
+}
+
+pub fn emit_membership_count_decremented(e: &Env, member: Address, new_count: u32) {
+    MembershipCountDecremented { member, new_count }.publish(e);
+}
+
+// ── Group Cloning ─────────────────────────────────────────────────────────────
+
+/// Event: A new group was initialized by cloning an existing group's config.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct GroupCloned {
+    /// Address of the source contract that was used as the config template.
+    pub source_contract: Address,
+    /// Admin of the newly created (cloned) group.
+    pub new_admin: Address,
+    /// Member count of the new group.
+    pub member_count: u32,
+    /// Contribution amount inherited or overridden.
+    pub contribution_amount: i128,
+}
+
+pub fn emit_group_cloned(
+    e: &Env,
+    source_contract: Address,
+    new_admin: Address,
+    member_count: u32,
+    contribution_amount: i128,
+) {
+    GroupCloned {
+        source_contract,
+        new_admin,
+        member_count,
+        contribution_amount,
+    }
+    .publish(e);
+}
