@@ -527,6 +527,10 @@ impl PreApprovedSpendingImpl {
             panic_with_error!(env, SpendingAllowanceError::InvalidAllowanceAmount);
         }
 
+        if per_transaction_limit > allowance.total_amount || daily_limit > allowance.total_amount {
+            panic_with_error!(env, SpendingAllowanceError::InvalidAllowanceAmount);
+        }
+
         allowance.per_transaction_limit = per_transaction_limit;
         allowance.daily_limit = daily_limit;
         env.storage().persistent().set(&key, &allowance);
@@ -632,5 +636,89 @@ mod tests {
         assert_eq!(audit.len(), 2);
         let first_log = audit.get(0).unwrap();
         assert_eq!(first_log.allowance_id, allowance_id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_allowance_limits_rejects_per_transaction_limit_above_total() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let customer = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let token = Address::generate(&env);
+        let metadata = Map::new(&env);
+
+        let allowance_id = PreApprovedSpendingImpl::create_allowance(
+            &env,
+            customer,
+            merchant,
+            token,
+            1000,
+            200,
+            500,
+            1_000_000,
+            make_bytes32(&env, 1),
+            metadata,
+        );
+
+        PreApprovedSpendingImpl::update_allowance_limits(&env, allowance_id, 1500, 500);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_allowance_limits_rejects_daily_limit_above_total() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let customer = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let token = Address::generate(&env);
+        let metadata = Map::new(&env);
+
+        let allowance_id = PreApprovedSpendingImpl::create_allowance(
+            &env,
+            customer,
+            merchant,
+            token,
+            1000,
+            200,
+            500,
+            1_000_000,
+            make_bytes32(&env, 1),
+            metadata,
+        );
+
+        PreApprovedSpendingImpl::update_allowance_limits(&env, allowance_id, 200, 1500);
+    }
+
+    #[test]
+    fn test_update_allowance_limits_accepts_values_at_total_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let customer = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let token = Address::generate(&env);
+        let metadata = Map::new(&env);
+
+        let allowance_id = PreApprovedSpendingImpl::create_allowance(
+            &env,
+            customer,
+            merchant,
+            token,
+            1000,
+            200,
+            500,
+            1_000_000,
+            make_bytes32(&env, 1),
+            metadata,
+        );
+
+        PreApprovedSpendingImpl::update_allowance_limits(&env, allowance_id, 1000, 1000);
+
+        let allowance = PreApprovedSpendingImpl::get_allowance(&env, allowance_id).unwrap();
+        assert_eq!(allowance.per_transaction_limit, 1000);
+        assert_eq!(allowance.daily_limit, 1000);
     }
 }

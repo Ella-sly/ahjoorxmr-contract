@@ -164,6 +164,36 @@ Refund escalation is part of the refund dispute flow and is used when the initia
 - **How the final outcome is enforced on-chain:** escalation moves the refund into `EscalatedToSenior` and stores the senior review deadline on-chain. Resolution can only be submitted by the configured senior arbiter, and the contract enforces the outcome by updating refund status and transferring tokens from the contract to the customer and, if configured, the fee recipient.
 - **Missed senior deadline:** if `auto_approve_on_senior_miss` is enabled, anyone can call `trigger_senior_auto_approve(refund_id)` after the senior deadline passes. This finalizes the refund on-chain, marks it `Processed`, and records the auto-approval source as `senior_miss`.
 
+## Merchant Evidence Submission Window
+
+When a customer requests a refund, the merchant is given a fixed window to submit counter-dispute evidence before the request can be adjudicated. This is tracked in `contracts/ahjoor-refund/src/lib.rs` and exercised by `contracts/ahjoor-refund/src/test_evidence_window.rs`.
+
+### Purpose
+
+The window exists so a merchant has a guaranteed opportunity to contest a refund request with supporting evidence (e.g. proof of delivery, correspondence) before an admin, delegate, or the escalation flow can act on the request. It prevents refunds from being approved or rejected purely on the customer's word during the period the merchant is still entitled to respond.
+
+### Configuration
+
+- **Window unit**: ledgers, not seconds — `merch_response_deadline = env.ledger().sequence() + merchant_response_window` is computed when the refund is created.
+- **Admin-configured**: `set_merchant_response_window(admin, window_ledgers)` sets the window length. `window_ledgers` must be positive (panics with `"window_ledgers must be positive"` otherwise).
+- **Read back**: `get_merchant_response_window()` returns the configured value, or `0` if never set.
+
+### Submitting evidence
+
+- `submit_refund_evidence(merchant, refund_id, evidence_hashes, statement_hash, content_hash)` — requires `merchant.require_auth()` and that the caller is the refund's own merchant.
+- Only allowed while the refund is `Requested` or already `EvidenceSubmitted`. A submission while the window is open moves (or keeps) the refund in `EvidenceSubmitted` status; a second submission from the same merchant overwrites the previously stored hash rather than creating a duplicate record.
+- On success, the refund's `evidence_submitted` flag is set and events `EvidenceAnchored` and `MerchantEvidenceSubmitted` are emitted.
+
+### Consequences of missing the window
+
+If the merchant does not submit evidence before `merch_response_deadline` is reached:
+
+- Any further call to `submit_refund_evidence` is rejected — the contract first auto-advances the refund's status to `EvidencePeriodExpired` and emits `EvidencePeriodExpired`, then panics with `"EvidenceDeadlinePassed"`. The merchant permanently loses the ability to attach evidence to that refund.
+- Adjudication is unblocked once the window closes: `approve_refund` refuses to act on a `Requested` refund whose window is still open (`"EvidenceWindowOpen: merchant evidence window has not elapsed"`), but once `env.ledger().sequence() >= merch_response_deadline`, it auto-advances the status to `EvidencePeriodExpired` and proceeds — the refund can be approved (or otherwise handled) without any merchant evidence on record.
+- `EvidencePeriodExpired` is also one of the statuses eligible for escalation to the senior arbiter via `escalate_to_senior`, once the primary review deadline has also passed.
+
+In short: missing the window doesn't block the refund from being resolved — it forfeits the merchant's chance to contest it with evidence, and the request proceeds through normal approval/escalation using whatever evidence (if any) was already on file.
+
 ## Events and error handling
 
 - Events: `RefundRequested`, `RefundCreated`, `RefundApproved`, `RefundClaimed`, `RefundExpired`, `RefundCancelled`.
