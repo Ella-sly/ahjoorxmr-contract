@@ -20,6 +20,9 @@ fn invoice_key(env: &Env, id: u32) -> (Symbol, u32) {
 fn inv_payment_key(env: &Env, id: u32) -> (Symbol, u32) {
     (Symbol::new(env, "inv_payment"), id)
 }
+fn inv_payment_index_key(env: &Env, invoice_id: u32) -> (Symbol, u32) {
+    (Symbol::new(env, "inv_pay_idx"), invoice_id)
+}
 fn settle_batch_key(env: &Env, id: u32) -> (Symbol, u32) {
     (Symbol::new(env, "settle_batch"), id)
 }
@@ -258,6 +261,16 @@ impl MultiTokenInvoiceImpl {
         let payment_key = inv_payment_key(env, next_payment_id);
         env.storage().persistent().set(&payment_key, &payment);
 
+        // Index payment under its invoice for get_invoice_payments lookups
+        let index_key = inv_payment_index_key(env, invoice_id);
+        let mut payment_ids: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or_else(|| Vec::new(env));
+        payment_ids.push_back(next_payment_id);
+        env.storage().persistent().set(&index_key, &payment_ids);
+
         // Store updated invoice
         env.storage().persistent().set(&key, &invoice);
         env.storage()
@@ -326,11 +339,23 @@ impl MultiTokenInvoiceImpl {
     }
 
     /// Get invoice payment history
-    pub fn get_invoice_payments(env: &Env, _invoice_id: u32) -> Vec<InvoicePayment> {
-        let payments = Vec::new(env);
+    pub fn get_invoice_payments(env: &Env, invoice_id: u32) -> Vec<InvoicePayment> {
+        let mut payments = Vec::new(env);
 
-        // This would require iterating through all payments and filtering by invoice_id
-        // For now, return empty vector - in production, use a proper indexing strategy
+        let index_key = inv_payment_index_key(env, invoice_id);
+        let payment_ids: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        for payment_id in payment_ids.iter() {
+            let payment_key = inv_payment_key(env, payment_id);
+            if let Some(payment) = env.storage().persistent().get(&payment_key) {
+                payments.push_back(payment);
+            }
+        }
+
         payments
     }
 
@@ -585,6 +610,17 @@ impl MultiTokenInvoiceImpl {
 
         let payment_key = inv_payment_key(env, next_payment_id);
         env.storage().persistent().set(&payment_key, &payment);
+
+        // Index payment under its invoice for get_invoice_payments lookups
+        let index_key = inv_payment_index_key(env, invoice_id);
+        let mut payment_ids: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or_else(|| Vec::new(env));
+        payment_ids.push_back(next_payment_id);
+        env.storage().persistent().set(&index_key, &payment_ids);
+
         env.storage().persistent().set(&key, &invoice);
         env.storage()
             .instance()
@@ -638,5 +674,96 @@ impl MultiTokenInvoiceImpl {
             .total_amount
             .checked_sub(total_paid)
             .unwrap_or_else(|| panic_with_error!(env, MultiTokenInvoiceError::SettlementFailed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_invoice_payments_returns_installments_across_multiple_tokens() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+
+        let invoice_id = MultiTokenInvoiceImpl::create_invoice(
+            &env,
+            merchant.clone(),
+            customer.clone(),
+            1000,
+            token_a.clone(),
+            Vec::from_array(&env, [token_a.clone(), token_b.clone()]),
+            token_a.clone(),
+            Vec::new(&env),
+            1_000_000,
+            Map::new(&env),
+        );
+
+        MultiTokenInvoiceImpl::set_conversion_rate(&env, merchant.clone(), token_a.clone(), 1_000_000);
+        MultiTokenInvoiceImpl::set_conversion_rate(&env, merchant.clone(), token_b.clone(), 2_000_000);
+
+        let payment1 = MultiTokenInvoiceImpl::accept_payment(
+            &env,
+            invoice_id,
+            customer.clone(),
+            token_a.clone(),
+            400,
+        );
+        let payment2 = MultiTokenInvoiceImpl::accept_payment(
+            &env,
+            invoice_id,
+            customer.clone(),
+            token_b.clone(),
+            300,
+        );
+
+        let payments = MultiTokenInvoiceImpl::get_invoice_payments(&env, invoice_id);
+
+        assert_eq!(payments.len(), 2);
+        let first = payments.get(0).unwrap();
+        let second = payments.get(1).unwrap();
+        assert_eq!(first.payment_id, payment1.payment_id);
+        assert_eq!(first.token, token_a);
+        assert_eq!(first.amount, 400);
+        assert_eq!(second.payment_id, payment2.payment_id);
+        assert_eq!(second.token, token_b);
+        assert_eq!(second.amount, 300);
+        assert_eq!(first.invoice_id, invoice_id);
+        assert_eq!(second.invoice_id, invoice_id);
+
+        // Both installments are reflected in base-currency payments received
+        let invoice = MultiTokenInvoiceImpl::get_invoice(&env, invoice_id).unwrap();
+        assert_eq!(invoice.status, InvoiceStatus::FullyPaid);
+    }
+
+    #[test]
+    fn test_get_invoice_payments_empty_for_unpaid_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token_a = Address::generate(&env);
+
+        let invoice_id = MultiTokenInvoiceImpl::create_invoice(
+            &env,
+            merchant.clone(),
+            customer,
+            1000,
+            token_a.clone(),
+            Vec::from_array(&env, [token_a.clone()]),
+            token_a,
+            Vec::new(&env),
+            1_000_000,
+            Map::new(&env),
+        );
+
+        let payments = MultiTokenInvoiceImpl::get_invoice_payments(&env, invoice_id);
+        assert_eq!(payments.len(), 0);
     }
 }
