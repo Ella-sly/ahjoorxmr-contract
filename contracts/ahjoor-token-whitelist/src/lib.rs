@@ -54,6 +54,8 @@ pub enum Error {
 pub struct TokenQuota {
     pub max_volume_per_period: i128,
     pub period_ledgers: u32,
+    /// Maximum amount allowed per transaction. None means no per-transaction limit.
+    pub max_per_transaction: Option<i128>,
 }
 
 /// #540: one slot of the fixed-size rolling window used by `record_token_volume`.
@@ -277,6 +279,7 @@ impl TokenWhitelistContract {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::DeprecatedTokenCount, &0u32);
+        env.storage().instance().set(&DataKey::WhitelistVersion, &0u64);
         let empty_vec: Vec<Address> = Vec::new(&env);
         env.storage().persistent().set(&DataKey::WhitelistedTokens, &empty_vec);
         env.storage().persistent().extend_ttl(
@@ -312,6 +315,7 @@ impl TokenWhitelistContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        Self::increment_whitelist_version(&env);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_whitelisted(&env, token, admin);
     }
@@ -346,6 +350,7 @@ impl TokenWhitelistContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        Self::increment_whitelist_version(&env);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         for token in tokens.iter() {
             events::emit_token_whitelisted(&env, token, admin.clone());
@@ -367,6 +372,7 @@ impl TokenWhitelistContract {
             panic!("Token not whitelisted");
         }
         Self::delist_token_storage(&env, &token);
+        Self::increment_whitelist_version(&env);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_delisted(&env, token, admin);
     }
@@ -1019,6 +1025,7 @@ impl TokenWhitelistContract {
         token: Address,
         max_volume_per_period: i128,
         period_ledgers: u32,
+        max_per_transaction: Option<i128>,
     ) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
@@ -1031,7 +1038,11 @@ impl TokenWhitelistContract {
         if max_volume_per_period <= 0 { panic!("max_volume_per_period must be positive"); }
         if period_ledgers == 0 { panic!("period_ledgers must be positive"); }
         if period_ledgers > MAX_QUOTA_PERIOD_LEDGERS { panic!("period_ledgers exceeds maximum allowed"); }
-        let quota = TokenQuota { max_volume_per_period, period_ledgers };
+        if let Some(max_tx) = max_per_transaction {
+            if max_tx <= 0 { panic!("max_per_transaction must be positive"); }
+            if max_tx > max_volume_per_period { panic!("max_per_transaction cannot exceed max_volume_per_period"); }
+        }
+        let quota = TokenQuota { max_volume_per_period, period_ledgers, max_per_transaction };
         env.storage().persistent().set(&DataKey::TokenQuota(token.clone()), &quota);
         env.storage().persistent().extend_ttl(&DataKey::TokenQuota(token.clone()), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         events::emit_token_quota_set(&env, token, max_volume_per_period, period_ledgers);
@@ -1043,6 +1054,7 @@ impl TokenWhitelistContract {
         token: Address,
         max_volume_per_period: i128,
         period_ledgers: u32,
+        max_per_transaction: Option<i128>,
     ) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
@@ -1052,7 +1064,11 @@ impl TokenWhitelistContract {
         if !env.storage().persistent().has(&DataKey::TokenQuota(token.clone())) {
             panic!("Token has no quota");
         }
-        let quota = TokenQuota { max_volume_per_period, period_ledgers };
+        if let Some(max_tx) = max_per_transaction {
+            if max_tx <= 0 { panic!("max_per_transaction must be positive"); }
+            if max_tx > max_volume_per_period { panic!("max_per_transaction cannot exceed max_volume_per_period"); }
+        }
+        let quota = TokenQuota { max_volume_per_period, period_ledgers, max_per_transaction };
         env.storage().persistent().set(&DataKey::TokenQuota(token.clone()), &quota);
         env.storage().persistent().extend_ttl(&DataKey::TokenQuota(token.clone()), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         events::emit_token_quota_set(&env, token, max_volume_per_period, period_ledgers);
@@ -1076,6 +1092,15 @@ impl TokenWhitelistContract {
         let Some(quota) = env.storage().persistent().get::<_, TokenQuota>(&DataKey::TokenQuota(token.clone())) else {
             return Ok(());
         };
+        
+        // Check per-transaction limit first
+        if let Some(max_tx) = quota.max_per_transaction {
+            if amount > max_tx {
+                events::emit_token_quota_exceeded(&env, token.clone(), amount, 0);
+                return Err(Error::QuotaExceeded);
+            }
+        }
+        
         let current_ledger = env.ledger().sequence();
 
         let bucket_span = (quota.period_ledgers / VOLUME_AGG_BUCKET_COUNT).max(1);
