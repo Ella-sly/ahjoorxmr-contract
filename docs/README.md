@@ -9,9 +9,12 @@ reference docs for the repository.
 
 - [**Failed Auto-Debit Retry Queue in ahjoor-payments**](payments-retry-queue.md) — Configurable exponential back-off retry queue for failed recurring debits, early customer retry trigger, max attempt handling, and recurring invoice cycle integration.
 - [**Merchant Collateral in ahjoor-payments**](payments-collateral.md) — Overview of required collateral deposits, minimum balances, withdrawals, and dispute slashing.
+- [**Customer Spend Limits and Cooling-Off Cancellation**](payments-customer-protections.md) — Per-customer and merchant-default rolling spend caps, window-reset semantics, and the cooling-off cancellation flow including what the merchant observes on cancellation.
 
 ## 2. ROSCA Contract (`ahjoor-rosca`)
 
+- [**Group Charter Acknowledgement in ROSCA**](rosca-group-charter.md) — Charter versioning, pre- vs post-activation update flows, the governance proposal path for charter changes, and every entry point gated on member acknowledgement.
+- [**Group Dissolution and Emergency Payout Voting in ROSCA**](rosca-dissolution-and-emergency-payout.md) — Admin-initiated and member-voted dissolution flows, pro-rata fund distribution on dissolution, vote thresholds, and the emergency payout request/vote/execute cycle.
 - [**Contribution Receipts in ROSCA**](rosca-contribution-receipts.md) — NFT-style contribution receipt data format, automatic minting on round finalization, event emissions, and member retrieval/verification functions.
 - [**Cosigner Guarantee in ROSCA**](rosca-cosigner-guarantee.md) — Overview of co-signer nomination, acceptance, and default coverage logic for community savings groups.
 - [**Contribution Delegation in ROSCA**](rosca-contribution-delegation.md) — Overview of contribution-vote delegation, how it differs from general governance delegation, and how revocation restores direct voting.
