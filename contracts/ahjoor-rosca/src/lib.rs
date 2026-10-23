@@ -13297,6 +13297,7 @@ mod test;
 mod test_audit_trail;
 mod test_contrib_delegation;
 mod test_cosigner_guarantee;
+mod test_dissolution;
 mod test_emergency_loan;
 mod test_emergency_reserve;
 mod test_group_freeze;

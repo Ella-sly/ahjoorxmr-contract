@@ -200,6 +200,11 @@ Use the [Feature Request template](.github/ISSUE_TEMPLATE/feature_request.md). P
 - Treat warnings as errors — CI runs with `RUSTFLAGS="-Dwarnings"`.
 - Write tests alongside new code; coverage gates are enforced in CI.
 
+### Documentation
+
+- The canonical project readme is `README.md` at the repository root. Do not add case-variant copies such as `readMe.md` or `Readme.md` — they collide with `README.md` on case-insensitive filesystems (default macOS and Windows).
+- Feature docs live in `docs/` and must be linked from the [docs index](docs/README.md) under their contract's `## ahjoor-<name>` section.
+
 ---
 
 By contributing, you agree that your submissions are made under the same licence as the project. Thank you for helping make this project better!

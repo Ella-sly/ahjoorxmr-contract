@@ -6938,6 +6938,9 @@ mod test_recall;
 
 #[cfg(test)]
 mod test_auto_approve_whitelist;
+
+#[cfg(test)]
+mod test_fraud_score;
 /// Event: Customer appealed a rejected refund (#159)
 #[contractevent]
 #[derive(Clone, Debug)]
